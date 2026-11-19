@@ -1,0 +1,29 @@
+// Every way an argument or result can cross, for checking bind against comptime Zig
+
+struct Vec3 { f32 x; f32 y; f32 z; }
+struct Pair { u32 a; u32 b; }
+struct Big { u64 a; u64 b; u64 c; }
+// Like a CPU's registers, more stack words by value than a few
+struct Huge { u64[25] parts; }
+enum Mode : u8 { one = 1, two }
+error Oops { Bad = 3 }
+
+trait Kitchen {
+    i32 add(i32 a, i64 b, u8 c);
+    f64 mix(f32 a, f64 b, i32 c, f32 d);
+    bool flip(bool b);
+    Mode next(Mode m);
+    usize len(string s);
+    string echo(string s);
+    Vec3 scale(Vec3 v, f32 by);
+    Pair swap(Pair p);
+    Big bigger(Big b, u64 by);
+    u32 sum([]u32 xs);
+    ?u32 half(?u32 x);
+    Vec3!Oops check(i32 x);
+    void!Oops ok(bool good);
+    [Thiscall] Vec3 thisVec(Vec3 v, i32 n);
+    [Stdcall] i64 std(i32 a, i64 b, Pair p);
+    Kitchen same();
+    u64 total(Huge h, u32 extra);
+}

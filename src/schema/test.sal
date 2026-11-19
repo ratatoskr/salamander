@@ -1,0 +1,124 @@
+// Everything the format has, once
+
+use wraith;
+
+struct Vec3 { f32 x; f32 y; f32 z; }
+
+[Size(0x20)]
+struct Entity {
+    [0x8] u32 id;
+    [0x10] Vec3 pos;
+}
+
+[Size(0x100), wraith.VirtualTable("B8 0D F0 70 1A E8", Offset(13), Rip)]
+struct Player : Entity {
+    utf8[16] name;
+    utf16* title;
+    [0x38] f32 health;
+    Job job;
+    [Offset(0x40)] Flags flags;
+    Stat stat;
+    [0x48] Player* target;
+    [0x50] Player*[4] party;
+    [0x71] u32 odd;
+    i16 level;
+    [0x78] u8 relation { bool party; bool alliance; [Bit(6)] bool drawn; }
+    ?Damageable owner;
+    // The game's own code and globals
+    [Virtual(2)] u32 attack(u32 times);
+    [wraith.Sig("90")] f32 heal(f32 amount);
+    [wraith.Sig("90")] static i32 total(u32 n);
+    [wraith.Sig("90")] static Player* main;
+    [wraith.Sig("90")] static u32 count;
+}
+
+[wraith.Sig("90")] static u32 answer;
+[wraith.Sig("90")] i32 entry(u32 a, u32 b);
+
+struct Pair { u8 a; u32 b; }
+
+enum Job : u8 { warrior = 1, mage, thief }
+
+bitfield Flags : u32 {
+    bool alive;
+    [Bit(4)] u8 level;
+    Job job : 4;
+}
+
+union Stat {
+    i32 int;
+    f32 float;
+}
+
+error LoadError { NotFound, Corrupt = 7 }
+
+const u32 max_players = 4;
+const f32 gravity = -9.8;
+const string greeting = "hi";
+const bool debug = false;
+
+opaque Handle;
+
+fn bool Visitor(u32 n);
+
+struct Hooks {
+    Visitor visit;
+    ?Visitor maybe;
+    Handle* handle;
+    object any;
+}
+
+trait Walker {
+    u32 walk(Visitor v);
+    Handle* handle();
+    object any();
+}
+
+trait Transform {
+    Vec3 position();
+    void setPosition(Vec3 p);
+}
+
+trait Named {
+    string name();
+}
+
+trait Damageable : Transform, Named {
+    [Thiscall] bool damage(f32 amount);
+    f32 health();
+    void setHealth(f32 hp);
+    f32 hp();
+    static Damageable* local();
+}
+
+trait OnMove {
+    void moved(Vec3 position);
+}
+
+trait Freecam {
+    void setSpeed(f32 speed);
+    void onMove(OnMove listener);
+    void onLand(fn(Vec3 at, ?Player* near) void listener);
+    async Vec3 flyTo(Vec3 target);
+    []u8 load(string path, ?u32 limit);
+    Vec3!LoadError restore(string name);
+    async ?Damageable!LoadError find(u32 id);
+}
+
+[Thiscall]
+impl Damageable for Player {
+    [Virtual(12)] damage;
+    [Sig("48 89 5C 24 ?? 57 48 83 EC 20")] name;
+    health = field health;
+    setHealth = field health;
+    hp = fn health;
+    position = field pos;
+    setPosition = field pos;
+    [wraith.Sig("E8 ?? ?? ?? ??", Rip)] local;
+}
+
+impl Transform for Entity {
+    position = field pos;
+}
+
+impl Named for Entity;

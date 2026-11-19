@@ -1,0 +1,38 @@
+// Shared by the engine tests in Zig, JS and Lua
+
+error GreetError { Shy = 1 }
+
+struct Pair { i32 a; i32 b; }
+
+union Num { f32 f; u32 u; }
+
+trait Greeter {
+    string greet(string who);
+    u32 count();
+    // Always fails, saying why
+    void!GreetError wave();
+    // Adds 1 to n and 10 to p.a
+    void bump(inout i32 n, inout Pair p);
+    // text's bytes, for the caller to own
+    blob pack(string text);
+    u32 size(blob b);
+    u32 sum([]u8 bytes);
+    // Calls f, a fn value made from `fn i32 (i32 a, i32 b)`
+    i32 apply(object f, i32 a, i32 b);
+    // C text, and a count to add 1 to if there is one
+    static cstring echo(cstring text, inout ?i32 seen);
+}
+
+trait Plugin {
+    string name();
+    i32 run(Greeter g, i32 n);
+    // Always fails, saying why
+    void!GreetError check();
+    // Swaps p's two and doubles x
+    void swap(inout Pair p, inout f32 x);
+    async string later(string who);
+    // Halves n.f, leaving n.u as it was read
+    void halve(inout Num n);
+    // b in capitals, for the caller to own
+    blob shout(blob b);
+}

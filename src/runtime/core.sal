@@ -1,0 +1,88 @@
+// The runtime's own traits, bound like any other schema.
+
+// Who something belongs to. Its first field is a u32 count of calls in flight, bit 31 set once closed.
+// Callers add 1 before calling through a table it guards, check the bit, and take 1 after.
+opaque Owner;
+
+// What a table's methods are, so callers built against another version of a trait find theirs.
+opaque Info;
+
+// What a queue runs, and what a promise calls once it's settled
+fn void Task();
+
+// What the host calls when native code lets go of an object, with its data
+fn void Release(usize data);
+
+// Work for one thread. Any thread posts, the thread that owns it runs it with poll.
+// Bytes kept by a count, so they go between languages without copying, like a captured frame.
+// Each holder releases its count. Schemas call it `blob`.
+trait Blob {
+    // Its memory. Fine to fill before handing it out.
+    []u8 bytes();
+    void retain();
+    void release();
+}
+
+trait Queue {
+    // False if it couldn't be kept
+    bool post(keep Task task);
+    // Runs what was there when it started, oldest first. Gives how many ran.
+    u32 poll();
+}
+
+// Whoever waits holds this. Errors come back from take as codes.
+trait Promise {
+    bool isSettled();
+    // The code, with the value copied to out if it's 0. Only once settled.
+    u32 take(?void* out);
+    // Runs task once settled, posted to where, or on the settling thread if where has no table
+    void then(keep Task task, keep Queue where);
+    void cancel();
+    void release();
+}
+
+// Whoever does the work holds this. Each settles it once.
+trait Resolver {
+    // Memory for what the value points at, like its text, kept with it. Before settling only.
+    ?void* hold(usize size, usize alignment);
+    void resolve(?void* value);
+    void reject(u32 code);
+    bool cancelled();
+    // Not going to settle it, so the waiter gets Gone
+    void drop();
+}
+
+// Handed to every plugin when it loads. Outlives all of them.
+trait Host {
+    // Kept for good, with this alignment
+    ?void* keep(usize size, usize alignment);
+    ?Owner* owner(string name);
+    // The host's copy of obj's table, which stops calling into it once owner closes.
+    // One that already has an owner keeps it.
+    object adopt(keep object obj, ?Owner* owner);
+    // obj laid out like want, with what its table has. No table across ABIs.
+    object adapt(keep object obj, Info* want);
+    // For a value size bytes big, with what settles it
+    Promise promise(usize size, Resolver* resolver);
+    // 0, 1 when the name's taken, 2 out of memory, 3 when its table has no owner
+    u32 provide(string name, u32 major, keep object obj);
+    void withdraw(string name, u32 major);
+    // Laid out like want. No table if there isn't one.
+    object get(string name, u32 major, Info* want);
+    // False out of memory
+    bool wait(string name, u32 major, Info* want, keep Resolver resolver);
+    Queue queue();
+    // Native code's done holding obj, from a keep parameter or a return.
+    // Does nothing unless its table's maker asked with releasable.
+    void release(object obj);
+    // Has release call hook with the data of objects whose tables owner guards, while it's open.
+    // So an owner's for one maker, which knows what its data is. False out of memory.
+    bool releasable(Owner* owner, keep Release hook);
+    // Why this thread's current call fails with the error called name, for its caller to show.
+    void explain(string name, string message);
+    // size bytes, zeroed, with one count. No table out of memory.
+    Blob blob(usize size);
+    // What this thread last explained for the error called name, or empty. Clears it.
+    // Good till the thread's next explanation.
+    string explanation(string name);
+}

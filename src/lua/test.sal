@@ -1,0 +1,27 @@
+// What the JS binder checks against comptime Zig
+
+struct Vec2 { f32 x; f32 y; }
+enum Mode : u8 { one = 1, two }
+error Problem { Bad = 3 }
+fn i32 Visit(i32 x);
+
+trait Counter {
+    i32 add(i32 n);
+    i64 big(i64 n);
+    string greet(string who);
+    Vec2 scale(Vec2 v, f32 by);
+    u32 sum([]u32 xs);
+    ?u32 half(?u32 x);
+    Mode next(Mode m);
+    Vec2!Problem check(i32 x);
+    i32 each(Visit f, i32 n);
+    Counter same();
+    async i32 later(i32 x);
+    // Native code may hold this one
+    void hold(keep Visit f);
+    // Only borrowed, so holding it is a mistake
+    void stash(Visit f);
+    i32 callHeld(i32 x);
+    // Lets go of what hold kept
+    void drop();
+}

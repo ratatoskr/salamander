@@ -1,0 +1,22 @@
+// Structs with text and slices, which generated Zig gives plain versions of
+
+struct Tag {
+    string label;
+    u32 weight;
+}
+
+struct Profile {
+    string name;
+    []Tag tags;
+    []u32 scores;
+    Tag best;
+}
+
+trait Profiles {
+    Profile echo(Profile p);
+    u32 count([]Tag tags);
+    string first([]string names);
+    Profile!ProfileError find(string name);
+}
+
+error ProfileError { Missing = 1 }
