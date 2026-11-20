@@ -118,7 +118,7 @@ fn readFolder(arena: std.mem.Allocator, io: std.Io, path: []const u8, prefix: []
     defer dir.close(io);
     const start = files.items.len;
     var walker = try dir.walk(arena);
-    defer walker.deinit();
+    defer walker.deinit(io);
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sal")) continue;
         const name = if (prefix.len > 0) try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.path }) else try arena.dupe(u8, entry.path);

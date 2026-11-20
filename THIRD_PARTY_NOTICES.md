@@ -6,7 +6,6 @@ Salamander includes code from these projects. Thanks to everyone who works on th
 |---|---|---|
 | [QuickJS-ng](https://github.com/quickjs-ng/quickjs) | MIT | runs JavaScript |
 | [Lua](https://www.lua.org) | MIT | runs Lua |
-| [translate-c](https://codeberg.org/ziglang/translate-c) | MIT | Zig bindings for QuickJS and Lua, with its helpers compiled in |
 | [Zig](https://ziglang.org) | MIT | built with Zig, its standard library is compiled into every binary |
 
 ## QuickJS-ng

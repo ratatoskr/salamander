@@ -1,5 +1,4 @@
 const std = @import("std");
-const Translator = @import("translate_c").Translator;
 
 const Import = std.Build.Module.Import;
 
@@ -216,7 +215,7 @@ fn trackSal(run: *std.Build.Step.Run, folder: std.Build.LazyPath) void {
     var dir = owner.root.openDir(io, sub_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
     var walker = dir.walk(owner.allocator) catch return;
-    defer walker.deinit();
+    defer walker.deinit(io);
     while (walker.next(io) catch return) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sal")) continue;
         run.addFileInput(.{ .src_path = .{ .owner = owner, .sub_path = owner.pathJoin(&.{ sub_path, entry.path }) } });
@@ -305,14 +304,15 @@ const quickjs = struct {
     /// Its C API, linked with the library.
     fn cApi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
         const src = b.dependency("quickjs", .{});
-        const t: Translator = .init(b.dependency("translate_c", .{}), .{
-            .c_source_file = src.path("quickjs.h"),
+        const t = b.addTranslateC(.{
+            .root_source_file = src.path("quickjs.h"),
             .target = target,
             .optimize = optimize,
         });
         t.addIncludePath(src.path("."));
-        t.mod.linkLibrary(library(b, src, target, optimize));
-        return t.mod;
+        const mod = t.createModule();
+        mod.linkLibrary(library(b, src, target, optimize));
+        return mod;
     }
 
     fn library(b: *std.Build, src: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
@@ -355,14 +355,15 @@ const lua = struct {
             \\#include "lualib.h"
             \\
         );
-        const t: Translator = .init(b.dependency("translate_c", .{}), .{
-            .c_source_file = header,
+        const t = b.addTranslateC(.{
+            .root_source_file = header,
             .target = target,
             .optimize = optimize,
         });
         t.addIncludePath(src.path("."));
-        t.mod.linkLibrary(library(b, src, target, optimize));
-        return t.mod;
+        const mod = t.createModule();
+        mod.linkLibrary(library(b, src, target, optimize));
+        return mod;
     }
 
     fn library(b: *std.Build, src: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {

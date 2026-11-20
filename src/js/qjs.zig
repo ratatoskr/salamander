@@ -17,11 +17,11 @@ fn special(tag: c_int) Value {
     return @as(u64, @as(u32, @bitCast(tag))) << 32;
 }
 
-pub fn cstr(s: [:0]const u8) [*c]const c_char {
+pub fn cstr(s: [:0]const u8) [*c]const u8 {
     return @ptrCast(s.ptr);
 }
 
-pub fn chars(s: []const u8) [*c]const c_char {
+pub fn chars(s: []const u8) [*c]const u8 {
     return @ptrCast(s.ptr);
 }
 
@@ -32,7 +32,7 @@ pub fn string(ctx: *Context, s: []const u8) Value {
 /// Borrowed from QuickJS until `free`.
 pub const String = struct {
     ctx: *Context,
-    ptr: [*c]const c_char,
+    ptr: [*c]const u8,
     len: usize,
 
     pub fn slice(self: String) []const u8 {

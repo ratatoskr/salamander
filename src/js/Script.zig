@@ -336,7 +336,7 @@ pub fn interrupt(self: *Script) void {
 }
 
 /// QuickJS reads one past the end, so the source gets a 0 after it.
-fn eval_(self: *Script, source: []const u8, name: [*c]const c_char, flags: c_int) qjs.Value {
+fn eval_(self: *Script, source: []const u8, name: [*c]const u8, flags: c_int) qjs.Value {
     const z = self.gpa.allocSentinel(u8, source.len, 0) catch return c.JS_ThrowOutOfMemory(self.ctx);
     @memcpy(z, source);
     defer self.gpa.free(z);
@@ -345,7 +345,7 @@ fn eval_(self: *Script, source: []const u8, name: [*c]const c_char, flags: c_int
 
 // Modules
 
-fn normalize(ctx_: ?*qjs.Context, base_: [*c]const c_char, name_: [*c]const c_char, opaque_: ?*anyopaque) callconv(.c) [*c]c_char {
+fn normalize(ctx_: ?*qjs.Context, base_: [*c]const u8, name_: [*c]const u8, opaque_: ?*anyopaque) callconv(.c) [*c]u8 {
     const ctx = ctx_.?;
     const self: *Script = @ptrCast(@alignCast(opaque_.?));
     const base = std.mem.span(@as([*:0]const u8, @ptrCast(base_)));
@@ -364,7 +364,7 @@ fn normalize(ctx_: ?*qjs.Context, base_: [*c]const c_char, name_: [*c]const c_ch
     return c.js_strndup(ctx, qjs.chars(resolved), resolved.len);
 }
 
-fn load(ctx_: ?*qjs.Context, name_: [*c]const c_char, opaque_: ?*anyopaque) callconv(.c) ?*c.JSModuleDef {
+fn load(ctx_: ?*qjs.Context, name_: [*c]const u8, opaque_: ?*anyopaque) callconv(.c) ?*c.JSModuleDef {
     const ctx = ctx_.?;
     const self: *Script = @ptrCast(@alignCast(opaque_.?));
     const name = std.mem.span(@as([*:0]const u8, @ptrCast(name_)));

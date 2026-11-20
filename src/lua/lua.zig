@@ -15,7 +15,7 @@ pub fn upvalue(i: c_int) c_int {
     return registry - i;
 }
 
-pub fn cstr(s: [:0]const u8) [*c]const c_char {
+pub fn cstr(s: [:0]const u8) [*c]const u8 {
     return @ptrCast(s.ptr);
 }
 
