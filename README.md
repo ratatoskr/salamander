@@ -16,6 +16,20 @@ Pre-release. Expect breaking changes.
 - Edits `.sal` text in place, for editors and tools.
 - Windows and Linux on x64, x86 and ARM64, and macOS.
 
+## Building
+
+You need the Zig version in `build.zig.zon` under `minimum_zig_version`. Then:
+
+```
+zig build test
+```
+
+`zig build build-test` builds the test programs into `zig-out/bin` without running them. Pass `-Dtarget=` to build for another platform, like `x86_64-linux-musl`.
+
+`src/runtime/core.zig` is generated from `core.sal`. After changing it, run `zig build core`.
+
+Want to help? See [CONTRIBUTING.md](https://github.com/ratatoskr/.github/blob/main/CONTRIBUTING.md). Found a security problem? See [SECURITY.md](https://github.com/ratatoskr/.github/blob/main/SECURITY.md).
+
 ## License
 
 Copyright (c) 2026 Asgard. Salamander is under the MIT License, see [LICENSE](LICENSE).

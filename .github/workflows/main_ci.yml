@@ -73,7 +73,10 @@ jobs:
       - name: install zig
         uses: mlugg/setup-zig@v2
         with:
-          use-cache: false
+          # One cache per matrix entry, started fresh when build.zig.zon changes. If one ever goes
+          # stale, `gh cache delete --all` clears them. Releases build without it.
+          cache-key: ${{ matrix.platform.target }}-${{ matrix.optimize }}-${{ hashFiles('build.zig.zon') }}
+          cache-size-limit: 350
 
       - name: run tests
         run: zig build test -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.platform.target }} --test-timeout 3m --summary all
