@@ -99,6 +99,17 @@ test "types print back as written" {
     try testing.expect(parsed.schema.findMethod(freecam, "flyTo").?.method.async);
 }
 
+test "an array as long as a field prints back, and takes no room" {
+    var parsed = try parseTest("struct Pair { u8 a; u32 b; } struct Bag { u32 count; Pair[count] pairs; }", .{ .pointer_size = 8 });
+    defer parsed.deinit();
+    const s = parsed.schema;
+    const pairs = s.findField(s.findType("Bag").?, "pairs").?;
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("Pair[count]", try std.fmt.bufPrint(&buf, "{f}", .{pairs.type}));
+    try testing.expectEqual(0, s.sizeOf(pairs.type));
+    try testing.expectEqual(4, pairs.offset);
+}
+
 test "default namespaces need no use" {
     var parsed = try parseTest(
         \\struct A { u32 x; }
@@ -324,6 +335,9 @@ test "mistakes say where and why" {
         .{ "[foo.Bar] struct A { u32 x; }", "there's no namespace 'foo'" },
         .{ "struct A { u32 x; } use wraith;", "`use` goes at the top" },
         .{ "enum E : u8 { a = 300 }", "E.a = 300 doesn't fit in a u8" },
+        .{ "struct A { u8[n] xs; }", "A has no field n for xs's length" },
+        .{ "struct A { f32 n; u8[n] xs; }", "A.n has the length of xs, so it has to be a whole number" },
+        .{ "struct A { u32 n; } [wraith.Sig(\"90\")] static u8[n] xs;", "an array as long as n only goes on a struct's field" },
         .{ "enum E : u8 { a = 1, b = 1 }", "E.a and E.b are both 1" },
         .{ "bitfield F : u8 { u8 a : 6; u8 b : 4; }", "F.b goes past bit 8" },
         .{ "bitfield F : u8 { u8 a : 4; [Bit(2)] bool b; }", "F.b overlaps a" },

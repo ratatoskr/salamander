@@ -155,6 +155,14 @@ pub const Ref = union(enum) {
     pub const Array = struct {
         len: usize,
         child: *const Ref,
+        /// `T[count]`, a struct field whose length is the field `count` next to it, read when it's
+        /// used. Its `len` is 0, so what doesn't read it sees an empty array.
+        count: ?[]const u8 = null,
+
+        /// As long as `n`, now it's been read.
+        pub fn sized(a: Array, n: usize) Array {
+            return .{ .len = n, .child = a.child };
+        }
     };
 
     pub const Result = struct {
@@ -165,13 +173,18 @@ pub const Ref = union(enum) {
 
     const Tag = std.meta.Tag(Ref);
 
+    fn eqlName(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return std.mem.eql(u8, a.?, b.?);
+    }
+
     pub fn eql(a: Ref, b: Ref) bool {
         if (@as(Tag, a) != @as(Tag, b)) return false;
         return switch (a) {
             .prim => |p| p == b.prim,
             .named => |n| std.mem.eql(u8, n, b.named),
             .pointer => |c| c.eql(b.pointer.*),
-            .array => |x| x.len == b.array.len and x.child.eql(b.array.child.*),
+            .array => |x| x.len == b.array.len and x.child.eql(b.array.child.*) and eqlName(x.count, b.array.count),
             .slice => |c| c.eql(b.slice.*),
             .optional => |c| c.eql(b.optional.*),
             .result => |r| std.mem.eql(u8, r.err, b.result.err) and r.ok.eql(b.result.ok.*),
@@ -185,7 +198,7 @@ pub const Ref = union(enum) {
             .prim => |p| try w.writeAll(@tagName(p)),
             .named => |n| try w.writeAll(n),
             .pointer => |c| try w.print("{f}*", .{c.*}),
-            .array => |a| try w.print("{f}[{d}]", .{ a.child.*, a.len }),
+            .array => |a| if (a.count) |n| try w.print("{f}[{s}]", .{ a.child.*, n }) else try w.print("{f}[{d}]", .{ a.child.*, a.len }),
             .slice => |c| try w.print("[]{f}", .{c.*}),
             .optional => |c| try w.print("?{f}", .{c.*}),
             .result => |r| try w.print("{f}!{s}", .{ r.ok.*, r.err }),
@@ -462,6 +475,7 @@ const Fnv = struct {
             .array => |a| {
                 f.int(a.len);
                 f.ref(a.child.*);
+                if (a.count) |n| f.bytes(n);
             },
             .result => |res| {
                 f.ref(res.ok.*);

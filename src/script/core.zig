@@ -368,6 +368,19 @@ pub fn Core(comptime L: type) type {
             return mem;
         }
 
+        /// A `T[count]` array as long as its count says now. None if that can't be read.
+        pub fn sized(self: *Self, v: views.View) views.View {
+            const at = v.count orelse return v;
+            const p = if (at.type == .prim) at.type.prim else return v.sized(0);
+            const n = p.size(v.schema.pointer_size);
+            if (n > 8) return v.sized(0);
+            var bytes: [8]u8 = @splat(0);
+            self.readMemory(at.address, bytes[0..n]) catch return v.sized(0);
+            const raw = std.mem.readInt(u64, &bytes, .little);
+            const len: u64 = if (p.isSigned()) @intCast(@max(memory.signed(raw, n), 0)) else raw;
+            return v.sized(@intCast(@min(len, views.max_count)));
+        }
+
         /// Can be 0.
         pub fn readPointer(self: *Self, at: usize) LocateError!usize {
             var word: usize = 0;

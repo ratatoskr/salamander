@@ -64,7 +64,8 @@ fn finalize(jrt: ?*c.JSRuntime, v: Value) callconv(.c) void {
 }
 
 /// `v` as a JS object.
-pub fn wrap(b: *Binder, v: View) convert.Error!Value {
+pub fn wrap(b: *Binder, unsized: View) convert.Error!Value {
+    const v = b.core.sized(unsized);
     const obj = c.JS_NewObjectClass(b.ctx, @intCast(b.view_class));
     if (c.JS_IsException(obj)) return error.Exception;
     const box: *Box = @ptrCast(@alignCast(c.js_malloc_rt(c.JS_GetRuntime(b.ctx), @sizeOf(Box)) orelse {

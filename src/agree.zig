@@ -20,7 +20,7 @@ fn genName(comptime name: []const u8) []const u8 {
 }
 
 /// `test.sal`'s types, since Zig can't list a file's declarations.
-const type_names = .{ "Vec3", "Entity", "Player", "Pair", "Job", "Flags", "Stat", "Handle", "Hooks", "Visitor" };
+const type_names = .{ "Vec3", "Entity", "Player", "Pair", "Bag", "Job", "Flags", "Stat", "Handle", "Hooks", "Visitor" };
 const trait_names = .{ "Walker", "Transform", "Named", "Damageable", "OnMove", "Freecam" };
 
 fn check(s: salamander_schema.Schema) !void {
@@ -345,4 +345,13 @@ test "implementations can take plain types" {
     try testing.expectEqual(1, obj.count(&tags));
     try testing.expectEqualStrings("y", obj.first(&.{ "x", "y" }));
     try testing.expectEqualStrings("found", (try obj.find("z")).tags[0].label);
+}
+
+test "an array as long as a field" {
+    // Its pairs are after it, past its own size
+    var held: extern struct { bag: gen.Bag, pairs: [3]gen.Pair } = .{ .bag = .{ .count = 2 }, .pairs = .{ .{ .a = 1, .b = 10 }, .{ .a = 2, .b = 20 }, .{ .a = 3, .b = 30 } } };
+    try testing.expectEqual(@offsetOf(@TypeOf(held), "pairs"), @offsetOf(gen.Bag, "pairs"));
+    const pairs = held.bag.pairsSlice();
+    try testing.expectEqual(2, pairs.len);
+    try testing.expectEqual(20, pairs[1].b);
 }

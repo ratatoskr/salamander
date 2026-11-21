@@ -404,6 +404,7 @@ const Gen = struct {
         const w = g.w;
         try w.print("pub const {f} = extern {s} {{\n", .{ id(try g.typeName(t.name)), if (t.kind == .@"union") "union" else "struct" });
         var names: std.ArrayList([]const u8) = .empty;
+        var counted: std.ArrayList(Counted) = .empty;
         var it: plan.Slots = .init(g.s, t);
         while (it.next()) |slot| switch (slot) {
             .pad => |p| if (t.kind == .@"union")
@@ -412,6 +413,7 @@ const Gen = struct {
                 try w.print("    _pad_0x{x}: [0x{x}]u8 = @splat(0),\n", .{ p.offset, p.len }),
             .field => |f| {
                 try g.claim(&names, t.name, f.field.name);
+                if (f.field.type == .array) if (f.field.type.array.count) |n| try counted.append(g.a, .{ .field = f.field.name, .count = n, .child = f.field.type.array.child.*, .alignment = if (f.alignment < f.natural) f.alignment else null });
                 try w.print("    {f}: ", .{id(f.field.name)});
                 try g.memType(f.field.type);
                 if (f.alignment < f.natural) try w.print(" align({d})", .{f.alignment});
@@ -424,8 +426,35 @@ const Gen = struct {
                 try w.writeAll(",\n");
             },
         };
+        // `T[count]` fields are empty arrays, with these for what's there
+        for (counted.items) |c| {
+            const fn_name = try std.fmt.allocPrint(g.a, "{s}Slice", .{c.field});
+            try g.claim(&names, t.name, fn_name);
+            try w.print("\n    /// `{s}`, as long as `{s}` says now.\n", .{ c.field, c.count });
+            const elem = try g.typeText(c.child);
+            const al = if (c.alignment) |n| try std.fmt.allocPrint(g.a, "align({d}) ", .{n}) else "";
+            try w.print("    pub fn {f}(self: *@This()) []{s}{s} {{\n", .{ id(fn_name), al, elem });
+            try w.print("        return @as([*]{s}{s}, @ptrCast(&self.{f}))[0..@intCast(@max(self.{f}, 0))];\n    }}\n", .{ al, elem, id(c.field), id(c.count) });
+        }
         if (t.kind == .@"struct") try g.gameCode(t, &names);
         try w.writeAll("};\n");
+    }
+
+    const Counted = struct {
+        field: []const u8,
+        count: []const u8,
+        child: Ref,
+        alignment: ?usize,
+    };
+
+    /// `memType`'s text on its own.
+    fn typeText(g: *Gen, r: Ref) Error![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(g.a);
+        const saved = g.w;
+        g.w = &out.writer;
+        defer g.w = saved;
+        try g.memType(r);
+        return out.written();
     }
 
     // Existing code, found through `rt.declared`

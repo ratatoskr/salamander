@@ -37,6 +37,9 @@ struct Player : Entity {
 
 struct Pair { u8 a; u32 b; }
 
+// As many pairs as `count` says, after it
+struct Bag { u32 count; [0x8] Pair[count] pairs; }
+
 enum Job : u8 { warrior = 1, mage, thief }
 
 bitfield Flags : u32 {

@@ -43,7 +43,8 @@ const Box = struct {
     view: View,
 };
 
-pub fn push(b: *Binder, l: *State, v: View) void {
+pub fn push(b: *Binder, l: *State, unsized: View) void {
+    const v = b.core.sized(unsized);
     const box: *Box = @ptrCast(@alignCast(c.lua_newuserdatauv(l, @sizeOf(Box), 0).?));
     box.* = .{ .binder = b, .view = v };
     _ = c.luaL_setmetatable(l, lua.cstr(view_name));

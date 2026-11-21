@@ -478,10 +478,12 @@ const Parser = struct {
             .l_bracket => {
                 if (p.peek().tag == .r_bracket) return p.fail(p.tok.start, "a slice's [] goes in front, like []u8", .{});
                 _ = p.advance();
-                const len = try p.number(usize, "an array length");
+                // `T[count]` takes its length from a field
+                const count: ?[]const u8 = if (p.tok.tag == .ident) p.text(p.advance()) else null;
+                const len = if (count == null) try p.number(usize, "an array length, or the field with it") else 0;
                 _ = try p.expect(.r_bracket, "']'");
                 const child = try p.box(Ref, r);
-                r = .{ .array = .{ .len = len, .child = child } };
+                r = .{ .array = .{ .len = len, .child = child, .count = count } };
             },
             else => break,
         };

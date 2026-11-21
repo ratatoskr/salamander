@@ -14,6 +14,13 @@ pub const View = struct {
     schema: Schema,
     type: Ref,
     address: usize,
+    /// For a `T[count]` array, where its count is. It has no items till `sized`.
+    count: ?Place = null,
+
+    /// Now its count's been read.
+    pub fn sized(v: View, n: usize) View {
+        return .{ .schema = v.schema, .type = .{ .array = v.type.array.sized(n) }, .address = v.address };
+    }
 
     pub fn named(v: View) ?*const Schema.Type {
         return switch (v.type) {
@@ -56,6 +63,9 @@ pub const Member = union(enum) {
     length: usize,
 };
 
+/// A `T[count]` array's count, read as more than this, is this.
+pub const max_count = 1 << 20;
+
 /// A field of `v` or its bases, a method, an index, or `length` for arrays.
 pub fn member(v: View, name: []const u8) ?Member {
     const s = v.schema;
@@ -70,7 +80,11 @@ pub fn member(v: View, name: []const u8) ?Member {
             const t = s.findType(n) orelse return null;
             switch (t.kind) {
                 .@"struct", .@"union" => {
-                    if (s.findField(t, name)) |f| return place(s, f.type, v.address + f.offset);
+                    if (s.findField(t, name)) |f| {
+                        if (f.type == .array) if (f.type.array.count) |len| if (s.findField(t, len)) |count|
+                            return .{ .view = .{ .schema = s, .type = f.type, .address = v.address + f.offset, .count = .{ .type = count.type, .address = v.address + count.offset } } };
+                        return place(s, f.type, v.address + f.offset);
+                    }
                     var buf: [256]u8 = undefined;
                     const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ t.name, name }) catch return null;
                     if (s.findFunction(full)) |f| return .{ .method = f };
@@ -254,7 +268,7 @@ test "members of a view" {
         \\struct Vec3 { f32 x; f32 y; f32 z; }
         \\bitfield Flags : u8 { bool alive; u8 level : 4; }
         \\struct Entity { [8] u32 id; }
-        \\struct Player : Entity { Vec3 pos; Flags flags; Player* target; utf8[8] name; utf8* title; u32[4] ids; }
+        \\struct Player : Entity { Vec3 pos; Flags flags; Player* target; utf8[8] name; utf8* title; u32[4] ids; u16 used; u32[used] more; }
     , .{ .any_namespace = true }, null);
     defer parsed.deinit();
     const s = parsed.schema;
@@ -271,6 +285,12 @@ test "members of a view" {
     try std.testing.expectEqual(4, member(ids, "length").?.length);
     try std.testing.expectEqual(ids.address + 8, member(ids, "2").?.value.address);
     try std.testing.expect(member(ids, "4") == null);
+    // Empty till its count's read, then as long as it says
+    const more = member(v, "more").?.view;
+    try std.testing.expectEqual(member(v, "used").?.value.address, more.count.?.address);
+    try std.testing.expectEqual(0, member(more, "length").?.length);
+    try std.testing.expectEqual(more.address + 4, member(more.sized(3), "1").?.value.address);
+    try std.testing.expect(member(more.sized(3), "3") == null);
     const flags = member(v, "flags").?.view;
     const level = member(flags, "level").?.bits;
     // `level` starts at bit 1, after `alive`

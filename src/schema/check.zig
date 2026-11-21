@@ -111,6 +111,7 @@ const Checker = struct {
             },
             .pointer => |child| try c.ref(child.*, .pointee, at),
             .array => |a| {
+                if (a.count) |n| return c.fail(at, "an array as long as {s} only goes on a struct's field, next to {s}", .{ n, n });
                 if (a.len == 0) return c.fail(at, "an array needs at least one item", .{});
                 if (use == .param or use == .ret) return c.fail(at, "C can't pass an array by value. Put it in a struct, or pass a pointer", .{});
                 try c.ref(a.child.*, .field, at);
@@ -217,7 +218,7 @@ const Checker = struct {
     fn structDef(c: Checker, t: *const Schema.Type, st: Schema.Struct) Error!void {
         const base_size: usize = if (c.s.baseOf(t)) |b| b.size else 0;
         for (st.fields, 0..) |f, i| {
-            try c.ref(f.type, .field, f.at);
+            if (f.type == .array and f.type.array.count != null) try c.counted(t, f) else try c.ref(f.type, .field, f.at);
             const size = (c.s.memory(f.type) orelse unreachable).size;
             for (st.fields[0..i]) |o| if (std.mem.eql(u8, f.name, o.name)) return c.fail(f.at, "{s} already has a {s}", .{ t.name, f.name });
             if (c.s.baseOf(t)) |b| if (c.s.findField(b, f.name) != null) return c.fail(f.at, "{s}.{s} is already in its base {s}", .{ t.name, f.name, b.name });
@@ -241,6 +242,18 @@ const Checker = struct {
             for (st.methods) |m| if (std.mem.eql(u8, v.name, m.name)) return c.fail(v.at, "{s} already has a {s}", .{ t.name, v.name });
             for (st.statics[0..i]) |o| if (std.mem.eql(u8, v.name, o.name)) return c.fail(v.at, "{s} already has a {s}", .{ t.name, v.name });
         }
+    }
+
+    /// `T[count] items;`, where `count` is a whole number in the same struct or its bases.
+    fn counted(c: Checker, t: *const Schema.Type, f: Schema.Field) Error!void {
+        const a = f.type.array;
+        const n = a.count.?;
+        const count = c.s.findField(t, n) orelse return c.fail(f.at, "{s} has no field {s} for {s}'s length", .{ t.name, n, f.name });
+        const whole = count.type == .prim and count.type.prim.isInt();
+        if (!whole) return c.fail(f.at, "{s}.{s} has the length of {s}, so it has to be a whole number", .{ t.name, n, f.name });
+        if (std.mem.eql(u8, n, f.name)) return c.fail(f.at, "{s} can't be its own length", .{f.name});
+        if (a.child.* == .array and a.child.array.count != null) return c.fail(f.at, "only the outside of {s} can take its length from a field", .{f.name});
+        try c.ref(a.child.*, .field, f.at);
     }
 
     fn trait(c: Checker, t: *const Schema.Trait) Error!void {
