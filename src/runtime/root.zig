@@ -188,6 +188,74 @@ pub const AnyObject = extern struct {
     }
 };
 
+/// Fields through pointers, like `follow(manager, "items.table.data")`, the way generated structs
+/// point at each other. Null at the first null pointer on the way. `start` is a pointer, or an
+/// optional one. A struct held by value along the way gives a pointer to it.
+pub fn follow(start: anytype, comptime path: []const u8) ?Followed(Start(@TypeOf(start)), path) {
+    const from: Start(@TypeOf(start)) = if (@typeInfo(@TypeOf(start)) == .optional) start orelse return null else start;
+    return followFrom(from, path);
+}
+
+fn followFrom(from: anytype, comptime path: []const u8) ?Followed(@TypeOf(from), path) {
+    if (path.len == 0) return from;
+    const dot = comptime std.mem.indexOfScalar(u8, path, '.');
+    const name = path[0 .. dot orelse path.len];
+    const next = step(from, name) orelse return null;
+    return if (dot) |d| followFrom(next, path[d + 1 ..]) else next;
+}
+
+/// What `follow` gives for `path` from a `P`.
+fn Followed(comptime P: type, comptime path: []const u8) type {
+    var T = P;
+    var rest = path;
+    while (rest.len > 0) {
+        const dot = std.mem.indexOfScalar(u8, rest, '.');
+        T = Step(T, rest[0 .. dot orelse rest.len]);
+        rest = if (dot) |d| rest[d + 1 ..] else "";
+    }
+    return T;
+}
+
+fn Start(comptime S: type) type {
+    const P = if (@typeInfo(S) == .optional) @typeInfo(S).optional.child else S;
+    const info = @typeInfo(P);
+    if (info != .pointer or info.pointer.size != .one) @compileError("follow starts at a pointer to a struct, not " ++ @typeName(S));
+    return P;
+}
+
+fn Step(comptime P: type, comptime name: []const u8) type {
+    const ptr = @typeInfo(P).pointer;
+    const F = @FieldType(ptr.child, name);
+    return switch (@typeInfo(F)) {
+        .pointer => |p| if (p.size == .one) F else @compileError(name ++ " isn't a pointer to one thing, so follow can't go through it"),
+        .optional => |o| if (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .one) o.child else @compileError(name ++ " is optional, but not a pointer"),
+        else => if (ptr.attrs.@"const") *const F else *F,
+    };
+}
+
+fn step(from: anytype, comptime name: []const u8) ?Step(@TypeOf(from), name) {
+    const F = @FieldType(@typeInfo(@TypeOf(from)).pointer.child, name);
+    return switch (@typeInfo(F)) {
+        .pointer => @field(from, name),
+        .optional => @field(from, name),
+        else => &@field(from.*, name),
+    };
+}
+
+test "follow goes through pointers and stops at a null one" {
+    const Data = extern struct { count: u32 };
+    const Sheet = extern struct { data: ?*Data };
+    const Holder = extern struct { pad: u64 = 0, table: ?*Sheet, inline_data: Data };
+    var data: Data = .{ .count = 3 };
+    var table: Sheet = .{ .data = &data };
+    var holder: Holder = .{ .table = &table, .inline_data = .{ .count = 9 } };
+    try std.testing.expectEqual(&data, follow(&holder, "table.data").?);
+    try std.testing.expectEqual(9, follow(@as(?*Holder, &holder), "inline_data").?.count);
+    table.data = null;
+    try std.testing.expectEqual(null, follow(&holder, "table.data"));
+    try std.testing.expectEqual(null, follow(@as(?*Holder, null), "table"));
+}
+
 /// A function value. It's a trait object with one method, `call`, so it has an owner like any other.
 pub fn Fn(comptime m: Method) type {
     return extern struct {
