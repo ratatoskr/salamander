@@ -52,15 +52,9 @@ pub const Module = struct {
 
 pub const TraitError = error{ OutOfMemory, NoSuchTrait, TooManyMethods };
 
-/// Finds code a schema declares in existing code, like a game's. Failures go through the host's `explain`.
-pub const Locator = struct {
-    ctx: ?*anyopaque = null,
-    /// Like `spawn`, `Player.heal` or `Player.local`.
-    address: *const fn (ctx: ?*anyopaque, name: []const u8) anyerror!usize,
-    /// False if the memory isn't there.
-    read: *const fn (ctx: ?*anyopaque, address: usize, out: []u8) bool,
-    write: *const fn (ctx: ?*anyopaque, address: usize, bytes: []const u8) bool,
-};
+/// Finds code a schema declares in existing code, like a game's, the same as generated Zig does.
+/// Failures go through the host's `explain`.
+pub const Locator = rt.declared.Locator;
 
 pub const LocateError = anyerror;
 
@@ -344,12 +338,12 @@ pub fn Core(comptime L: type) type {
         /// Copies memory that might not be there.
         pub fn readMemory(self: *Self, at: usize, out: []u8) LocateError!void {
             const l = self.locator orelse return error.NoLocator;
-            if (!l.read(l.ctx, at, out)) return self.host.explain(error.Unreadable, "can't read 0x{x}", .{at});
+            if (!l.readInto(at, out)) return self.host.explain(error.Unreadable, "can't read 0x{x}", .{at});
         }
 
         pub fn writeMemory(self: *Self, at: usize, bytes: []const u8) LocateError!void {
             const l = self.locator orelse return error.NoLocator;
-            if (!l.write(l.ctx, at, bytes)) return self.host.explain(error.Unreadable, "can't write 0x{x}", .{at});
+            if (!l.writeFrom(at, bytes)) return self.host.explain(error.Unreadable, "can't write 0x{x}", .{at});
         }
 
         /// Errors on null.

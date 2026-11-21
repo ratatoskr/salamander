@@ -189,8 +189,9 @@ pub const AnyObject = extern struct {
 };
 
 /// Fields through pointers, like `follow(manager, "items.table.data")`, the way generated structs
-/// point at each other. Null at the first null pointer on the way. `start` is a pointer, or an
-/// optional one. A struct held by value along the way gives a pointer to it.
+/// point at each other. Null at the first null pointer on the way, or one that can't be read, since
+/// each is read through `declared.read`. `start` is a pointer, or an optional one. A struct held by
+/// value along the way gives a pointer to it.
 pub fn follow(start: anytype, comptime path: []const u8) ?Followed(Start(@TypeOf(start)), path) {
     const from: Start(@TypeOf(start)) = if (@typeInfo(@TypeOf(start)) == .optional) start orelse return null else start;
     return followFrom(from, path);
@@ -235,10 +236,15 @@ fn Step(comptime P: type, comptime name: []const u8) type {
 
 fn step(from: anytype, comptime name: []const u8) ?Step(@TypeOf(from), name) {
     const F = @FieldType(@typeInfo(@TypeOf(from)).pointer.child, name);
+    // Only where it is, nothing's read yet
+    const field = &@field(from.*, name);
     return switch (@typeInfo(F)) {
-        .pointer => @field(from, name),
-        .optional => @field(from, name),
-        else => &@field(from.*, name),
+        .pointer, .optional => {
+            var word: usize = 0;
+            if (!declared.read(@intFromPtr(field), std.mem.asBytes(&word)[0..@sizeOf(F)])) return null;
+            return if (word == 0) null else @ptrFromInt(word);
+        },
+        else => field,
     };
 }
 
@@ -254,6 +260,25 @@ test "follow goes through pointers and stops at a null one" {
     table.data = null;
     try std.testing.expectEqual(null, follow(&holder, "table.data"));
     try std.testing.expectEqual(null, follow(@as(?*Holder, null), "table"));
+
+    // A pointer that can't be read stops it too
+    const Unreadable = struct {
+        var bad: usize = 0;
+        fn address(_: ?*anyopaque, _: []const u8) anyerror!usize {
+            return error.NotFound;
+        }
+        fn read(_: ?*anyopaque, at: usize, out: []u8) bool {
+            if (at == bad) return false;
+            @memcpy(out, @as([*]const u8, @ptrFromInt(at))[0..out.len]);
+            return true;
+        }
+    };
+    Unreadable.bad = @intFromPtr(&holder.table);
+    declared.setLocator(.{ .address = Unreadable.address, .read = Unreadable.read });
+    defer declared.setLocator(null);
+    table.data = &data;
+    try std.testing.expectEqual(null, follow(&holder, "table.data"));
+    try std.testing.expectEqual(9, follow(&holder, "inline_data").?.count);
 }
 
 /// A function value. It's a trait object with one method, `call`, so it has an owner like any other.

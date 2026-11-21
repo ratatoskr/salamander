@@ -274,6 +274,14 @@ pub const Arg = union(enum) {
     string: []const u8,
     ident: []const u8,
     call: Call,
+
+    /// A name written bare or quoted, like `count` or `"count"`.
+    pub fn name(self: Arg) ?[]const u8 {
+        return switch (self) {
+            .ident, .string => |n| n,
+            else => null,
+        };
+    }
 };
 
 pub const Call = struct {

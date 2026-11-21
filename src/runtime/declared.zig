@@ -1,5 +1,6 @@
-//! How generated Zig finds existing code a schema declares, like a game's functions found by signature.
-//! Each binary asks its own locator, set by whatever loads it. Addresses are found once, then kept.
+//! How generated Zig and scripts find existing code a schema declares, like a game's functions found
+//! by signature, and read memory that might not be there. Each binary asks its own locator, set by
+//! whatever loads it. Addresses are found once, then kept.
 
 const std = @import("std");
 
@@ -7,12 +8,33 @@ pub const Locator = struct {
     ctx: ?*anyopaque = null,
     /// Where `name` is, like `spawn`, `Player.heal`, `Player.local`, or `Player` for its vtable.
     address: *const fn (ctx: ?*anyopaque, name: []const u8) anyerror!usize,
+    /// False if the memory isn't there. Null reads it straight, which faults if it isn't.
+    read: ?*const fn (ctx: ?*anyopaque, address: usize, out: []u8) bool = null,
+    write: ?*const fn (ctx: ?*anyopaque, address: usize, bytes: []const u8) bool = null,
+
+    pub fn readInto(self: Locator, at: usize, out: []u8) bool {
+        if (self.read) |f| return f(self.ctx, at, out);
+        @memcpy(out, @as([*]const u8, @ptrFromInt(at))[0..out.len]);
+        return true;
+    }
+
+    pub fn writeFrom(self: Locator, at: usize, bytes: []const u8) bool {
+        if (self.write) |f| return f(self.ctx, at, bytes);
+        @memcpy(@as([*]u8, @ptrFromInt(at))[0..bytes.len], bytes);
+        return true;
+    }
 };
 
 var locator: ?Locator = null;
 
 pub fn setLocator(l: ?Locator) void {
     locator = l;
+}
+
+/// Copies memory through the locator, false if it isn't there. Straight without one.
+pub fn read(at: usize, out: []u8) bool {
+    const l = locator orelse Locator{ .address = undefined };
+    return l.readInto(at, out);
 }
 
 /// Asks every time. `Found` keeps it.
