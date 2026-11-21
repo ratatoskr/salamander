@@ -20,6 +20,70 @@ Pre-release. Expect breaking changes.
 - Edits `.sal` text in place, for editors and tools.
 - Windows and Linux on x64, x86 and ARM64, and macOS.
 
+## Example
+
+A trait in a `.sal` schema:
+
+```
+// greeter.sal
+trait Greeter {
+    string greet(string who);
+    u32 count();
+}
+```
+
+Turn it into a Zig module in `build.zig`:
+
+```zig
+const greeter = salamander.zigModule(dep, .{ .source = b.path("greeter.sal"), .target = target });
+exe.root_module.addImport("greeter", greeter);
+```
+
+Implement it in Zig, and hand it to a script as the module `app`:
+
+```zig
+const rt = @import("salamander_runtime");
+const hosts = @import("salamander_hosts");
+const Greeter = @import("greeter").Greeter;
+
+const Hello = struct {
+    greeted: u32 = 0,
+    buf: [64]u8 = undefined,
+
+    pub fn greet(self: *Hello, who: []const u8) []const u8 {
+        self.greeted += 1;
+        return std.fmt.bufPrint(&self.buf, "hello {s}", .{who}) catch "hello";
+    }
+
+    pub fn count(self: *Hello) u32 {
+        return self.greeted;
+    }
+};
+
+var hello: Hello = .{};
+const obj: rt.Object(Greeter) = .init(&hello, rt.implement(Greeter, Hello));
+
+const script = try hosts.create(.js, .{ .gpa = gpa });
+defer script.deinit();
+const types = try script.schema(@embedFile("greeter.sal"));
+try script.module("app", &.{.{ .name = "greeter", .schema = types, .trait = "Greeter", .obj = .of(obj) }});
+try script.run(source, "main.js");
+```
+
+Then the script calls it, typed by the same schema:
+
+```js
+import { greeter } from "app";
+globalThis.greeting = `${greeter.greet("js")}, ${greeter.count()} so far`;
+```
+
+```lua
+local app = require("app")
+greeting = app.greeter:greet("lua") .. ", " .. app.greeter:count() .. " so far"
+```
+
+`script.eval("greeting", &buf)` reads it back. Scripts can implement traits too, and Zig takes them with `script.take`.
+
 ## Building
 
 You need the Zig version in `build.zig.zon` under `minimum_zig_version`. Then:
