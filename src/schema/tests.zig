@@ -109,6 +109,36 @@ test "default namespaces need no use" {
     try testing.expectEqualStrings("wraith", parsed.schema.impls[0].items[0].annotations[0].namespace);
 }
 
+test "a tagged struct is a global, as its instance" {
+    const tagged: []const schema.Namespace = &.{.{ .name = "wraith", .annotations = &.{ "Sig", "Instance", "Module" } }};
+    const options: schema.Options = .{
+        .namespaces = tagged,
+        .uses = &.{"wraith"},
+        .instances = &.{.{ .namespace = "wraith", .name = "Instance", .as = "Sig" }},
+    };
+    var parsed = try parseTest(
+        \\[Instance("48 8B 0D ?? ?? ?? ?? 3D", Rip), Module("game.exe")]
+        \\struct Manager { u32 mira; }
+    , options);
+    defer parsed.deinit();
+    const v = parsed.schema.findStatic("Manager.instance").?.static;
+    try testing.expectEqualStrings("Manager", v.type.pointer.named);
+    // Renamed for the tool, with what's next to it, and still where it was written
+    const sig = Schema.findAnnotation(v.annotations, "wraith", "Sig").?;
+    try testing.expectEqualStrings("48 8B 0D ?? ?? ?? ?? 3D", sig.args[0].string);
+    try testing.expectEqual(std.mem.indexOf(u8, parsed.source, "Instance(").?, sig.at);
+    try testing.expect(Schema.findAnnotation(v.annotations, "wraith", "Module") != null);
+
+    var diag: Schema.Diagnostic = .{};
+    try testing.expectError(error.InvalidSchema, schema.parse(testing.allocator, "[Instance(\"90\")] union U { u32 a; }", options, &diag));
+    try testing.expect(std.mem.indexOf(u8, diag.message(), "union") != null);
+    try testing.expectError(error.InvalidSchema, schema.parse(testing.allocator, "[Instance(\"90\")] struct S { [Sig(\"90\")] static S* instance; }", options, &diag));
+    // Without the option it's just the struct's own annotation
+    var plain = try parseTest("[Instance(\"90\")] struct S { u32 a; }", .{ .namespaces = tagged, .uses = &.{"wraith"} });
+    defer plain.deinit();
+    try testing.expectEqual(null, plain.schema.findStatic("S.instance"));
+}
+
 test "game code is declared where it lives" {
     const source =
         \\[VirtualTable("48 8D 05 ?? ?? ?? ??", Offset(3), Rip)]

@@ -185,6 +185,8 @@ pub const ZigOptions = struct {
     uses: []const []const u8 = &.{},
     /// Other folders of `.sal` files in the same schema, each named, like a dependency's.
     with: []const With = &.{},
+    /// Tags that make a struct a global, like `wraith.Instance=Sig`. See the parser's `InstanceTag`.
+    instances: []const []const u8 = &.{},
 
     pub const With = struct { name: []const u8, folder: std.Build.LazyPath };
 };
@@ -238,6 +240,7 @@ fn generate(b: *std.Build, gen: *std.Build.Step.Compile, runtime: *std.Build.Mod
     } else run.addFileArg(options.source.?);
     run.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{options.target.result.ptrBitWidth() / 8}) });
     for (options.uses) |u| run.addArgs(&.{ "--use", u });
+    for (options.instances) |i| run.addArgs(&.{ "--instance", i });
     for (options.with) |w| {
         run.addArgs(&.{ "--with", w.name });
         run.addDirectoryArg(w.folder);

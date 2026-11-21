@@ -15,8 +15,19 @@ pub const Namespace = struct {
     annotations: ?[]const []const u8 = null,
 };
 
+/// A tool's annotation that marks a struct as a global, like `[Instance("..")] struct Player`. The
+/// struct gets `static Player* instance`, whose annotations are the struct's with this one renamed to
+/// `as`, so the tool finds it like any other static.
+pub const InstanceTag = struct {
+    namespace: []const u8,
+    name: []const u8,
+    as: []const u8,
+};
+
 pub const Options = struct {
     pointer_size: u8 = @sizeOf(usize),
+    /// See `InstanceTag`.
+    instances: []const InstanceTag = &.{},
     /// Namespaces tools registered, like `game`.
     namespaces: []const Namespace = &.{},
     /// In scope without a `use`, so a tool's own files can say `[Sig]`.
@@ -688,6 +699,7 @@ const Parser = struct {
         }
         _ = p.advance();
         p.optionalSemicolon();
+        if (try p.instanceOf(a, type_name, is_union)) |v| try statics.append(p, v);
         s.fields = try fields.done(p);
         s.methods = try methods.done(p);
         s.statics = try statics.done(p);
@@ -713,6 +725,20 @@ const Parser = struct {
             .at = @intCast(at),
             .annotations = a.extra,
         };
+    }
+
+    /// `Type.instance` for a struct tagged with one of `opts.instances`.
+    fn instanceOf(p: *P, a: Anns, type_name: []const u8, is_union: bool) Error!?Schema.Static {
+        for (a.extra, 0..) |ann, i| for (p.opts.instances) |tag| {
+            if (!std.mem.eql(u8, ann.namespace, tag.namespace) or !std.mem.eql(u8, ann.name, tag.name)) continue;
+            if (is_union) return p.fail(ann.at, "[{s}] goes on a struct, and {s} is a union", .{ tag.name, type_name });
+            const annotations = try p.arena.dupe(Schema.Annotation, a.extra);
+            annotations[i].name = tag.as;
+            const self = try p.arena.create(Ref);
+            self.* = .{ .named = type_name };
+            return .{ .name = "instance", .type = .{ .pointer = self }, .at = ann.at, .annotations = annotations };
+        };
+        return null;
     }
 
     /// A global in existing code, after its type and name.

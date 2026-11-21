@@ -1,4 +1,4 @@
-//! `salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--with NAME DIR]... [--check]`
+//! `salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]`
 //! `salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]`
 //! `salamander-gen bundle <out.sal> <in>`
 //! `<in>` is a `.sal` file or a folder whose `.sal` files, nested too, make one schema.
@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var core = false;
     var uses: std.ArrayList([]const u8) = .empty;
     var with: std.ArrayList([2][]const u8) = .empty;
+    var instances: std.ArrayList(salamander_schema.InstanceTag) = .empty;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--pointer-size")) {
             pointer_size = std.fmt.parseInt(u8, args.next() orelse return usage(), 10) catch return usage();
@@ -44,6 +45,12 @@ pub fn main(init: std.process.Init) !void {
             core = true;
         } else if (std.mem.eql(u8, arg, "--use")) {
             try uses.append(arena, args.next() orelse return usage());
+        } else if (std.mem.eql(u8, arg, "--instance")) {
+            // Like `wraith.Instance=Sig`
+            const spec = args.next() orelse return usage();
+            const dot = std.mem.indexOfScalar(u8, spec, '.') orelse return usage();
+            const eq = std.mem.indexOfScalarPos(u8, spec, dot, '=') orelse return usage();
+            try instances.append(arena, .{ .namespace = spec[0..dot], .name = spec[dot + 1 .. eq], .as = spec[eq + 1 ..] });
         } else if (std.mem.eql(u8, arg, "--with")) {
             const name = args.next() orelse return usage();
             try with.append(arena, .{ name, args.next() orelse return usage() });
@@ -56,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     if (is_bundle) return std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = source });
     var diag: Schema.Diagnostic = .{};
     // Annotations are for tools, so any namespace is fine here
-    var parsed = salamander_schema.parse(arena, source, .{ .pointer_size = pointer_size, .any_namespace = true, .uses = uses.items }, &diag) catch |err| switch (err) {
+    var parsed = salamander_schema.parse(arena, source, .{ .pointer_size = pointer_size, .any_namespace = true, .uses = uses.items, .instances = instances.items }, &diag) catch |err| switch (err) {
         error.InvalidSchema => fail(in_path, is_dir, diag.message()),
         else => return err,
     };
@@ -135,7 +142,7 @@ fn readFolder(arena: std.mem.Allocator, io: std.Io, path: []const u8, prefix: []
 
 fn usage() error{Usage} {
     std.debug.print(
-        \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--with NAME DIR]... [--check]
+        \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]
         \\       salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]
         \\       salamander-gen bundle <out.sal> <in>
         \\<in> is a .sal file, or a folder of them that make one schema.

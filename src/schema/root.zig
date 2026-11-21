@@ -7,6 +7,7 @@ pub const plan = @import("plan.zig");
 const parser = @import("parse.zig");
 pub const Options = parser.Options;
 pub const Namespace = parser.Namespace;
+pub const InstanceTag = parser.InstanceTag;
 pub const Parsed = parser.Parsed;
 pub const parse = parser.parse;
 pub const parseType = parser.parseType;
