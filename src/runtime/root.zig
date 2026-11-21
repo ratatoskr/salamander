@@ -410,7 +410,13 @@ const callMethod = invoke;
 /// Calls `name` on `obj`, which is any object type for `Desc`.
 pub fn invoke(comptime Desc: type, comptime name: []const u8, obj: anytype, args: Args(Desc, name)) Return(Desc, name) {
     const m = comptime method(Desc, name);
-    const table: *const Table(Desc) = @ptrCast(@alignCast(obj.table orelse return gone(Return(Desc, name))));
+    var table: *const Table(Desc) = @ptrCast(@alignCast(obj.table orelse return gone(Return(Desc, name))));
+    // Made for another version of the trait, like an object from a newer host. Its methods match by
+    // name, since their order isn't ours
+    if (table.salamander_info.hash != Desc.salamander.hash) {
+        const fitted = host().adapt(Desc, obj);
+        table = @ptrCast(@alignCast(fitted.table orelse return missing(Return(Desc, name))));
+    }
     const entry = @field(table, name) orelse return missing(Return(Desc, name));
     const owner = table.salamander_owner;
     if (owner) |o| if (!o.enter()) return gone(Return(Desc, name));

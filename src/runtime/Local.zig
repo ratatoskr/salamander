@@ -307,6 +307,27 @@ fn Counter(comptime version: u64, comptime extra: bool) type {
 const V1 = Counter(1, false);
 const V2 = Counter(2, true);
 
+/// V2 with `reset` put first, like a method added in the middle.
+const Reordered = struct {
+    pub const salamander = struct {
+        pub const name = "Counter";
+        pub const hash: u64 = 3;
+        pub const methods: []const rt.Method = &.{ .{ .name = "reset", .Fn = fn (u32) u32 }, .{ .name = "next", .Fn = fn () u32 } };
+    };
+};
+
+test "an object from another version of its trait is called by method name" {
+    var c: Count = .{};
+    // Made by a newer binary, called by one built against V1
+    const newer: rt.Object(V1) = .{ .data = @intFromPtr(&c), .table = rt.implement(Reordered, Count) };
+    try testing.expectEqual(1, newer.call(.next, .{}));
+    try testing.expectEqual(2, newer.call(.next, .{}));
+    // One it doesn't have does nothing
+    const older: rt.Object(V2) = .{ .data = @intFromPtr(&c), .table = rt.implement(V1, Count) };
+    try testing.expectEqual(0, older.call(.reset, .{7}));
+    try testing.expectEqual(3, older.call(.next, .{}));
+}
+
 const Count = struct {
     n: u32 = 0,
 
