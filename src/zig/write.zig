@@ -119,7 +119,10 @@ const Gen = struct {
         for (s.traits) |t| try g.claim(&g.top, "", t.name);
         for (s.constants) |k| try g.claim(&g.top, "", k.name);
         for (s.functions) |f| try g.claim(&g.top, "", f.name);
-        for (s.statics) |v| try g.claim(&g.top, "", v.name);
+        for (s.statics) |v| {
+            try g.claim(&g.top, "", v.name);
+            if (v.type == .pointer) try g.claim(&g.top, "", try std.fmt.allocPrint(g.a, "{s}OrFail", .{v.name}));
+        }
         if (s.functions.len + s.statics.len > 0) {
             try g.claim(&g.top, "", "addresses");
             if (s.functions.len > 0) try g.claim(&g.top, "", "Fns");
@@ -451,7 +454,10 @@ const Gen = struct {
         const has_virtual = for (methods.items) |m| {
             if (m.virtual != null) break true;
         } else false;
-        for (statics.items) |v| try g.claim(names, t.name, v.name);
+        for (statics.items) |v| {
+            try g.claim(names, t.name, v.name);
+            if (v.type == .pointer) try g.claim(names, t.name, try std.fmt.allocPrint(g.a, "{s}OrFail", .{v.name}));
+        }
         for (methods.items) |m| try g.claim(names, t.name, m.name);
         try g.claim(names, t.name, "addresses");
         if (methods.items.len > 0) try g.claim(names, t.name, "Fns");
@@ -558,6 +564,11 @@ const Gen = struct {
             try w.print(" {{\n{s}    const at: *align(1) const ", .{indent});
             try g.memType(v.type);
             try w.print(" = @ptrFromInt(try {s}addresses.{f}());\n{s}    return at.*;\n{s}}}\n", .{ try g.qual(owner), id(v.name), indent, indent });
+            // The same, for when null means it's too early
+            const or_fail = try std.fmt.allocPrint(g.a, "{s}OrFail", .{v.name});
+            try w.print("\n{s}/// `{s}`, or `error.NotThereYet` while it's null.\n{s}pub fn {f}() anyerror!*", .{ indent, full, indent, id(or_fail) });
+            try g.memType(v.type.pointer.*);
+            try w.print(" {{\n{s}    return (try {s}{f}()) orelse error.NotThereYet;\n{s}}}\n", .{ indent, try g.qual(owner), id(v.name), indent });
             return;
         }
         // Methods need a struct's own alignment. Anything else could be anywhere
