@@ -16,6 +16,17 @@ pub const Options = struct {
     /// Where it came from, for the header.
     label: []const u8 = "a .sal file",
     runtime: []const u8 = "salamander_runtime",
+    /// What was parsed, so `aliases` can tell which file each thing's in.
+    source: []const u8 = "",
+    aliases: []const Alias = &.{},
+};
+
+/// Everything declared in bundled files whose names start with `prefix`, like `wraith/`, comes from
+/// the Zig module `import` instead, which has the same names. Structs are checked against the
+/// schema's layout as they compile.
+pub const Alias = struct {
+    prefix: []const u8,
+    import: []const u8,
 };
 
 /// Two things Zig can't tell apart are `error.NameClash`.
@@ -23,7 +34,7 @@ pub fn write(gpa: std.mem.Allocator, s: Schema, w: *std.Io.Writer, options: Opti
     var scratch: Schema.Diagnostic = .{};
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var g: Gen = .{ .s = s, .w = w, .a = arena.allocator(), .diag = diagnostic orelse &scratch };
+    var g: Gen = .{ .s = s, .w = w, .a = arena.allocator(), .diag = diagnostic orelse &scratch, .source = options.source, .aliases = options.aliases };
     try g.file(options);
 }
 
@@ -32,6 +43,8 @@ const Gen = struct {
     w: *std.Io.Writer,
     a: std.mem.Allocator,
     diag: *Schema.Diagnostic,
+    source: []const u8 = "",
+    aliases: []const Alias = &.{},
     top: std.ArrayList([]const u8) = .empty,
     /// Every `addresses` function, for `resolve`.
     finds: std.ArrayList([]const u8) = .empty,
@@ -42,6 +55,40 @@ const Gen = struct {
 
     fn isLifted(g: *const Gen, n: []const u8) bool {
         return contains(g.lifted.items, n);
+    }
+
+    /// The module what's declared at `at` comes from, if its file's aliased.
+    fn aliasOf(g: *const Gen, at: Schema.Pos) ?[]const u8 {
+        if (g.aliases.len == 0) return null;
+        const file_name = Schema.fileOf(g.source, at);
+        for (g.aliases) |a| if (std.mem.startsWith(u8, file_name, a.prefix)) return a.import;
+        return null;
+    }
+
+    /// `pub const T = @import("m").T;`, and for structs a check it's laid out as the schema says.
+    fn aliasDef(g: *Gen, t: *const Schema.Type, import: []const u8) Error!void {
+        const w = g.w;
+        const n = try g.typeName(t.name);
+        try w.print("pub const {f} = @import(\"{s}\").{f};\n", .{ id(n), import, id(n) });
+        if (t.kind == .@"error") {
+            const c = try g.codeName(t.name);
+            try w.print("pub const {f} = @import(\"{s}\").{f};\n", .{ id(c), import, id(c) });
+        }
+        if (t.kind != .@"struct" and t.kind != .@"union") return;
+        // The wire one, which plain structs have in `raw`
+        const T = if (g.isLifted(t.name))
+            try std.fmt.allocPrint(g.a, "@import(\"{s}\").raw.{f}", .{ import, id(n) })
+        else
+            try std.fmt.allocPrint(g.a, "{f}", .{id(n)});
+        try w.print("comptime {{\n    if (@sizeOf({s}) != {d}) @compileError(\"salamander: {s} from {s} isn't {d} bytes like the schema says\");\n", .{ T, t.size, t.name, import, t.size });
+        if (t.kind == .@"struct") {
+            var it: plan.Slots = .init(g.s, t);
+            while (it.next()) |slot| switch (slot) {
+                .pad => {},
+                .field => |f| try w.print("    if (@offsetOf({s}, \"{s}\") != {d}) @compileError(\"salamander: {s}.{s} from {s} isn't at {d} like the schema says\");\n", .{ T, f.field.name, f.field.offset, t.name, f.field.name, import, f.field.offset }),
+            };
+        }
+        try w.writeAll("}\n");
     }
 
     /// Whether `r`'s plain type differs from its wire one.
@@ -134,6 +181,10 @@ const Gen = struct {
 
         for (s.types) |*t| {
             try g.w.writeAll("\n");
+            if (g.aliasOf(t.at)) |import| {
+                try g.aliasDef(t, import);
+                continue;
+            }
             switch (t.kind) {
                 .@"struct", .@"union" => if (g.isLifted(t.name)) try g.plainDef(t) else try g.structDef(t),
                 .@"enum" => |e| {
@@ -152,8 +203,16 @@ const Gen = struct {
             }
         }
         if (s.constants.len > 0) try g.w.writeAll("\n");
-        for (s.constants) |k| try g.constant(k);
-        for (s.traits) |*t| try g.trait(t);
+        for (s.constants) |k| {
+            if (g.aliasOf(k.at)) |import| {
+                try g.w.print("pub const {f} = @import(\"{s}\").{f};\n", .{ id(k.name), import, id(k.name) });
+            } else try g.constant(k);
+        }
+        for (s.traits) |*t| {
+            if (g.aliasOf(t.at)) |import| {
+                try g.w.print("\npub const {f} = @import(\"{s}\").{f};\n", .{ id(t.name), import, id(t.name) });
+            } else try g.trait(t);
+        }
         if (s.impls.len > 0) try g.impls();
         try g.globals();
         if (g.finds.items.len > 0) try g.resolveFn();
@@ -167,6 +226,10 @@ const Gen = struct {
         for (g.s.types) |*t| {
             const n = try g.typeName(t.name);
             if (g.isLifted(t.name)) {
+                if (g.aliasOf(t.at)) |import| {
+                    try w.print("pub const {f} = @import(\"{s}\").raw.{f};\n", .{ id(n), import, id(n) });
+                    continue;
+                }
                 g.in_raw = true;
                 defer g.in_raw = false;
                 try g.structDef(t);
@@ -925,4 +988,39 @@ test "names Zig can't tell apart" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try std.testing.expectError(error.NameClash, write(std.testing.allocator, parsed.schema, &out.writer, .{}, &diag));
+}
+
+test "aliased files come from another module" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try salamander_schema.bundle(a, &.{
+        .{ .name = "math/math.sal", .text = "struct Vec3 { f32 x; f32 y; f32 z; }\nstruct Named { string name; f32 w; }\ntrait Shape { f32 area(); }\nconst u32 dims = 3;" },
+        .{ .name = "game.sal", .text = "struct Player { Vec3 at; }\ntrait Mover { Vec3 move(Vec3 by, Named n); }" },
+    });
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(a, source, .{ .pointer_size = 8 }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(a);
+    try write(a, parsed.schema, &out.writer, .{ .source = source, .aliases = &.{.{ .prefix = "math/", .import = "tuft_math" }} }, &diag);
+    const text = out.written();
+    const want = [_][]const u8{
+        "pub const Vec3 = @import(\"tuft_math\").Vec3;",
+        "if (@sizeOf(Vec3) != 12)",
+        "if (@offsetOf(Vec3, \"z\") != 8)",
+        // Plain structs are checked by their wire layout
+        "pub const Named = @import(\"tuft_math\").Named;",
+        "if (@sizeOf(@import(\"tuft_math\").raw.Named) != 24)",
+        "pub const Shape = @import(\"tuft_math\").Shape;",
+        "pub const dims = @import(\"tuft_math\").dims;",
+        // Everything else is written as usual, using them
+        "pub const Player = extern struct {\n    at: Vec3 = std.mem.zeroes(Vec3),",
+        "pub fn move(self: Mover, by: Vec3, n: Named) Vec3 {",
+    };
+    for (want) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, text, "pub const Vec3 = extern struct") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "pub const Named = @import(\"tuft_math\").raw.Named;") != null);
 }

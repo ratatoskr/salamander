@@ -4,6 +4,8 @@
 //! `<in>` is a `.sal` file or a folder whose `.sal` files, nested too, make one schema.
 //! `--use NS` puts a tool's namespace in scope, like a `use` in every file.
 //! `--with NAME DIR` adds another folder's `.sal` files, named `NAME/...`, like a dependency's.
+//! `--alias PREFIX=MODULE` takes what files starting with PREFIX declare from the Zig module MODULE,
+//! like `--alias wraith/=wraith_api_zig`, so the types are the ones that module already has.
 //! `--check` writes nothing and fails if the output isn't what it would write.
 
 const std = @import("std");
@@ -31,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     var core = false;
     var uses: std.ArrayList([]const u8) = .empty;
     var with: std.ArrayList([2][]const u8) = .empty;
+    var aliases: std.ArrayList(salamander_zig.Alias) = .empty;
     var instances: std.ArrayList(salamander_schema.InstanceTag) = .empty;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--pointer-size")) {
@@ -54,6 +57,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--with")) {
             const name = args.next() orelse return usage();
             try with.append(arena, .{ name, args.next() orelse return usage() });
+        } else if (std.mem.eql(u8, arg, "--alias")) {
+            const spec = args.next() orelse return usage();
+            const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return usage();
+            try aliases.append(arena, .{ .prefix = spec[0..eq], .import = spec[eq + 1 ..] });
         } else return usage();
     }
 
@@ -74,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     const written = if (is_c)
         salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core }, &diag)
     else
-        salamander_zig.write(arena, parsed.schema, &out.writer, .{ .label = label, .runtime = runtime }, &diag);
+        salamander_zig.write(arena, parsed.schema, &out.writer, .{ .label = label, .runtime = runtime, .source = source, .aliases = aliases.items }, &diag);
     written catch |err| switch (err) {
         error.NameClash => fail(in_path, is_dir, diag.message()),
         else => return err,

@@ -187,8 +187,12 @@ pub const ZigOptions = struct {
     with: []const With = &.{},
     /// Tags that make a struct a global, like `wraith.Instance=Sig`. See the parser's `InstanceTag`.
     instances: []const []const u8 = &.{},
+    /// What files starting with `prefix` declare comes from `module` instead, imported as `name`.
+    /// Like a `with` folder whose Zig another module already has.
+    aliases: []const Alias = &.{},
 
     pub const With = struct { name: []const u8, folder: std.Build.LazyPath };
+    pub const Alias = struct { prefix: []const u8, name: []const u8, module: *std.Build.Module };
 };
 
 /// A folder of `.sal` files bundled into one, for `@embedFile` and comptime binding, like
@@ -246,9 +250,18 @@ fn generate(b: *std.Build, gen: *std.Build.Step.Compile, runtime: *std.Build.Mod
         run.addDirectoryArg(w.folder);
         trackSal(run, w.folder);
     }
+    var imports: std.ArrayList(std.Build.Module.Import) = .empty;
+    imports.append(b.allocator, .{ .name = "salamander_runtime", .module = runtime }) catch @panic("OOM");
+    for (options.aliases) |a| {
+        run.addArgs(&.{ "--alias", b.fmt("{s}={s}", .{ a.prefix, a.name }) });
+        const listed = for (imports.items) |i| {
+            if (std.mem.eql(u8, i.name, a.name)) break true;
+        } else false;
+        if (!listed) imports.append(b.allocator, .{ .name = a.name, .module = a.module }) catch @panic("OOM");
+    }
     return b.createModule(.{
         .root_source_file = out,
-        .imports = &.{.{ .name = "salamander_runtime", .module = runtime }},
+        .imports = imports.items,
     });
 }
 
