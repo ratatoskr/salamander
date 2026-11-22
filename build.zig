@@ -208,8 +208,10 @@ pub fn bundle(dep: *std.Build.Dependency, folder: std.Build.LazyPath) std.Build.
 
 /// A directory argument doesn't rerun when its contents change, so each `.sal` goes in as an input too.
 /// The build script lists the folder, so it reruns when a file's added or removed. Folders in a source
-/// tree, the build's own or a dependency's.
+/// tree, the build's own or a dependency's, or anywhere else by its path, like a plugin's dependency
+/// found next to it.
 fn trackSal(run: *std.Build.Step.Run, folder: std.Build.LazyPath) void {
+    if (folder == .cwd_relative) return trackSalAt(run, folder.cwd_relative);
     const owner, const sub_path = switch (folder) {
         .src_path => |s| .{ s.owner, s.sub_path },
         .dependency => |d| .{ d.dependency.builder, d.sub_path },
@@ -225,6 +227,20 @@ fn trackSal(run: *std.Build.Step.Run, folder: std.Build.LazyPath) void {
     while (walker.next(io) catch return) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sal")) continue;
         run.addFileInput(.{ .src_path = .{ .owner = owner, .sub_path = owner.pathJoin(&.{ sub_path, entry.path }) } });
+    }
+}
+
+fn trackSalAt(run: *std.Build.Step.Run, path: []const u8) void {
+    const b = run.step.owner;
+    b.dependOnDirectoryMetadata(.{ .cwd_relative = path });
+    const io = b.graph.io;
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit(io);
+    while (walker.next(io) catch return) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sal")) continue;
+        run.addFileInput(.{ .cwd_relative = b.pathJoin(&.{ path, entry.path }) });
     }
 }
 
