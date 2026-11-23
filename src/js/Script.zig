@@ -418,6 +418,7 @@ fn require(ctx_: ?*qjs.Context, this: Value, argc: c_int, argv: [*c]Value) callc
     const s = qjs.toString(ctx, argv[0]) orelse return qjs.exception;
     defer s.free();
     const name = s.slice();
+    if (self.requireNative(ctx, name)) |v| return v;
     const r = self.resolver orelse return qjs.throw(ctx, "can't require '{s}': there's no module by that name", .{name});
     var buf: [512]u8 = undefined;
     const resolved = r.resolve(r.ctx, &buf, "", name) orelse return qjs.throw(ctx, "can't require '{s}': there's no module by that name", .{name});
@@ -453,6 +454,43 @@ fn require(ctx_: ?*qjs.Context, this: Value, argc: c_int, argv: [*c]Value) callc
     }
     c.JS_FreeValue(ctx, ran);
     return qjs.get(ctx, module_, "exports");
+}
+
+/// A native module, the schema or the builtins as one object, like importing all of it. Made once.
+/// Null if `name` is none of them.
+fn requireNative(self: *Script, ctx: *qjs.Context, name: []const u8) ?Value {
+    const native = self.natives.find(name);
+    const is_schema = std.mem.eql(u8, name, Binder.schema_module);
+    const is_builtin = std.mem.eql(u8, name, Binder.builtin_module);
+    if (native == null and !is_schema and !is_builtin) return null;
+    var key_buf: [512:0]u8 = undefined;
+    const key = std.fmt.bufPrintSentinel(&key_buf, "native:{s}", .{name}, 0) catch return qjs.throw(ctx, "can't require '{s}': its name is too long", .{name});
+    const cached = c.JS_GetPropertyStr(ctx, self.required, qjs.cstr(key));
+    if (!c.JS_IsUndefined(cached)) return cached;
+
+    const obj = if (is_schema) self.binder.schemaObject() catch return qjs.exception else c.JS_NewObject(ctx);
+    if (native) |n| for (n.exports) |e| {
+        const v = self.exported(e) catch {
+            c.JS_FreeValue(ctx, obj);
+            return qjs.throw(ctx, "can't export {s}", .{e.name});
+        };
+        var buf: [256:0]u8 = undefined;
+        const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{e.name}, 0) catch {
+            c.JS_FreeValue(ctx, v);
+            continue;
+        };
+        _ = c.JS_SetPropertyStr(ctx, obj, qjs.cstr(z), v);
+    };
+    if (is_builtin) for (Binder.builtin_exports) |e| {
+        const f = self.binder.builtin(e);
+        if (c.JS_IsException(f)) {
+            c.JS_FreeValue(ctx, obj);
+            return f;
+        }
+        _ = c.JS_SetPropertyStr(ctx, obj, qjs.cstr(e), f);
+    };
+    _ = c.JS_SetPropertyStr(ctx, self.required, qjs.cstr(key), c.JS_DupValue(ctx, obj));
+    return obj;
 }
 
 fn initBuiltin(ctx_: ?*qjs.Context, m: ?*c.JSModuleDef) callconv(.c) c_int {

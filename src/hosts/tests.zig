@@ -240,6 +240,26 @@ test "scripts in every language use native objects and give their own" {
     }
 }
 
+test "require gives native modules the way import does" {
+    const checks = [_][]const u8{
+        "require('app').greeter.pack('hi').length + ' ' + (require('app') === require('app'))",
+        "return #require('app').greeter:pack('hi') .. ' ' .. tostring(require('app') == require('app'))",
+    };
+    for (&cases, checks) |*case, check| {
+        var files: Files = undefined;
+        const s = try make(case, &files);
+        defer s.deinit();
+        const types = try s.schema(source);
+        var hello: Hello = .{};
+        const greeter: rt.Object(Greeter) = .init(&hello, rt.implement(Greeter, Hello));
+        try s.module("app", &.{.{ .name = "greeter", .schema = types, .trait = "Greeter", .obj = .of(greeter) }});
+        var buf: [256]u8 = undefined;
+        const shown = s.eval(check, &buf);
+        if (shown == .thrown) std.debug.print("{t}: {s}\n", .{ case.language, shown.thrown });
+        try testing.expectEqualStrings("2 true", shown.value);
+    }
+}
+
 test "blobs go both ways without copying, and every count's let go" {
     const scripts = [_][]const u8{
         \\import { greeter } from "app";
