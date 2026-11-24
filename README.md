@@ -11,6 +11,7 @@ Pre-release. Expect breaking changes.
 ## Features
 
 - `.sal` schemas: structs, enums, bitfields, errors, and traits with plain, async and failing methods.
+- Namespaces, and generic structs that make a struct for each set of types they're used with.
 - Generates Zig, with plain types and their wire forms, and C headers.
 - TypeScript and LuaLS typings for scripts' editors.
 - Trait objects that cross DLLs, checked by hash, and stop when their owner goes.

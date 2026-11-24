@@ -68,17 +68,35 @@ const Checker = struct {
     }
 
     fn names(c: Checker) Error!void {
-        const count = c.s.types.len + c.s.traits.len + c.s.constants.len;
-        for (0..count) |i| {
-            const a = c.nameAt(i);
-            for (0..i) |j| if (std.mem.eql(u8, c.nameAt(j).name, a.name)) return c.fail(a.at, "there's already something named {s}", .{a.name});
+        const s = c.s;
+        if (s.type_order.len != s.types.len) {
+            const count = s.types.len + s.traits.len + s.constants.len;
+            for (0..count) |i| {
+                const a = c.nameAt(i);
+                for (0..i) |j| if (std.mem.eql(u8, c.nameAt(j).name, a.name)) return c.fail(a.at, "there's already something named {s}", .{a.name});
+            }
+            return;
+        }
+        // Sorted, so the same names are next to each other. The later one's the one to point at.
+        for (1..@max(s.type_order.len, 1)) |k| {
+            const x = s.type_order[k - 1];
+            const y = s.type_order[k];
+            if (!std.mem.eql(u8, s.types[x].name, s.types[y].name)) continue;
+            const later = s.types[@max(x, y)];
+            return c.fail(later.at, "there's already something named {s}", .{later.name});
+        }
+        for (s.traits, 0..) |t, i| {
+            if (s.findType(t.name) != null) return c.fail(t.at, "there's already something named {s}", .{t.name});
+            for (s.traits[0..i]) |o| if (std.mem.eql(u8, o.name, t.name)) return c.fail(t.at, "there's already something named {s}", .{t.name});
+        }
+        for (s.constants, 0..) |k, i| {
+            if (s.findType(k.name) != null or s.findTrait(k.name) != null) return c.fail(k.at, "there's already something named {s}", .{k.name});
+            for (s.constants[0..i]) |o| if (std.mem.eql(u8, o.name, k.name)) return c.fail(k.at, "there's already something named {s}", .{k.name});
         }
     }
 
     fn topLevel(c: Checker, name: []const u8) bool {
-        const count = c.s.types.len + c.s.traits.len + c.s.constants.len;
-        for (0..count) |i| if (std.mem.eql(u8, c.nameAt(i).name, name)) return true;
-        return false;
+        return c.s.findType(name) != null or c.s.findTrait(name) != null or c.s.findConstant(name) != null;
     }
 
     /// Existing code's, which has to say where it is.

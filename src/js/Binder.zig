@@ -596,14 +596,21 @@ fn callDeclared(b: *Binder, name: []const u8, this: ?usize, args: []const Value)
 
 pub const schema_module = "schema";
 
-/// Structs and top-level functions. Top-level statics are only on the default export, since an
-/// export can't read memory each time.
+/// Structs and top-level functions, and the namespaces at the top that others are in. Top-level
+/// statics are only on the default export, since an export can't read memory each time.
 pub fn schemaExports(b: *Binder, out: *std.ArrayList([:0]const u8), a: std.mem.Allocator) error{OutOfMemory}!void {
     var it = b.core.declaring();
     while (it.next()) |s| {
-        for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested) try out.append(a, try dupeZ(a, t.name));
-        for (s.functions) |f| try out.append(a, try dupeZ(a, f.name));
+        for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested) try addExport(out, a, t.name);
+        for (s.functions) |f| try addExport(out, a, f.name);
     }
+}
+
+/// `Scene.Node` is exported as `Scene`.
+fn addExport(out: *std.ArrayList([:0]const u8), a: std.mem.Allocator, name: []const u8) error{OutOfMemory}!void {
+    const root = if (Schema.namespaceEnd(name) != null) name[0..std.mem.indexOfScalar(u8, name, '.').?] else name;
+    for (out.items) |e| if (std.mem.eql(u8, e, root)) return;
+    try out.append(a, try dupeZ(a, root));
 }
 
 fn dupeZ(a: std.mem.Allocator, text: []const u8) error{OutOfMemory}![:0]const u8 {
@@ -629,16 +636,15 @@ fn fillSchema(b: *Binder, all: Value, s: Schema) convert.Error!void {
     for (s.types) |*t| {
         if (t.kind == .@"enum" and !t.nested) {
             // Its values by name, to combine flags like `WindowFlags.NoTitleBar | WindowFlags.NoMove`
-            const values = c.JS_NewObject(ctx);
-            if (c.JS_IsException(values)) return error.Exception;
+            const values = try b.objectIn(all, t.name);
+            defer c.JS_FreeValue(ctx, values);
             for (t.kind.@"enum".values) |v| qjs.set(ctx, values, v.name, c.JS_NewInt64(ctx, @intCast(v.value)));
-            qjs.set(ctx, all, t.name, values);
             continue;
         }
         if (t.kind != .@"struct" or t.nested) continue;
-        const class = c.JS_NewObject(ctx);
-        if (c.JS_IsException(class)) return error.Exception;
-        qjs.set(ctx, all, t.name, class);
+        // What's in a namespace of the same name may already be on it
+        const class = try b.objectIn(all, t.name);
+        defer c.JS_FreeValue(ctx, class);
         // Bases' first, so the struct's own win
         var chain: [32]*const Schema.Type = undefined;
         var depth: usize = 0;
@@ -664,8 +670,38 @@ fn fillSchema(b: *Binder, all: Value, s: Schema) convert.Error!void {
         if (s.findFunction(std.fmt.bufPrint(&buf, "{s}.at", .{t.name}) catch continue) == null)
             qjs.set(ctx, class, "at", try b.classAt(t.name));
     }
-    for (s.functions) |f| qjs.set(ctx, all, f.name, try b.declaredFunction(f.name, f.signature.params.len));
-    for (s.statics) |v| try b.declaredStatic(all, v.name, v.name);
+    for (s.functions) |f| {
+        const in, const leaf = try b.namespaceIn(all, f.name);
+        defer c.JS_FreeValue(ctx, in);
+        qjs.set(ctx, in, leaf, try b.declaredFunction(f.name, f.signature.params.len));
+    }
+    for (s.statics) |v| {
+        const in, const leaf = try b.namespaceIn(all, v.name);
+        defer c.JS_FreeValue(ctx, in);
+        try b.declaredStatic(in, leaf, v.name);
+    }
+}
+
+/// The object for `name`'s namespace under `all`, made on the way, and the rest of its name. So
+/// `Scene.Node` goes on `all.Scene` as `Node`. Caller frees it.
+fn namespaceIn(b: *Binder, all: Value, name: []const u8) convert.Error!struct { Value, []const u8 } {
+    const end = Schema.namespaceEnd(name) orelse return .{ c.JS_DupValue(b.ctx, all), name };
+    return .{ try b.objectIn(all, name[0..end]), name[end + 1 ..] };
+}
+
+/// The object at `path` under `all`, like `Scene.Node`, made with any on the way if they're not
+/// there. Caller frees it.
+fn objectIn(b: *Binder, all: Value, path: []const u8) convert.Error!Value {
+    const ctx = b.ctx;
+    const in, const leaf = try b.namespaceIn(all, path);
+    defer c.JS_FreeValue(ctx, in);
+    const have = qjs.get(ctx, in, leaf);
+    if (c.JS_IsObject(have)) return have;
+    c.JS_FreeValue(ctx, have);
+    const made = c.JS_NewObject(ctx);
+    if (c.JS_IsException(made)) return error.Exception;
+    qjs.set(ctx, in, leaf, c.JS_DupValue(ctx, made));
+    return made;
 }
 
 fn binderWord(b: *Binder) Value {

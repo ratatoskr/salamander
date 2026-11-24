@@ -62,8 +62,111 @@ pub const DocLines = struct {
 
 /// A type's name as one identifier. Nested ones, like a field's bitfield, are `Struct.field`.
 pub fn writeTypeName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
-    for (name) |ch| try w.writeByte(if (ch == '.') '_' else ch);
+    return Schema.writeFlatName(w, name);
 }
+
+/// What the `schema` module has in a namespace, like `Node` in `Scene`: structs, enums, functions
+/// and statics. Generics' instances aren't, since their names aren't names in scripts.
+pub const Member = struct {
+    /// Its whole name, like `Scene.Node`.
+    name: []const u8,
+    what: What,
+
+    pub const What = union(enum) {
+        type: *const Schema.Type,
+        function: *const Schema.Method,
+        static: *const Schema.Static,
+    };
+
+    pub fn parent(m: Member) []const u8 {
+        return m.name[0..Schema.namespaceEnd(m.name).?];
+    }
+
+    pub fn leaf(m: Member) []const u8 {
+        return m.name[Schema.namespaceEnd(m.name).? + 1 ..];
+    }
+};
+
+pub const Members = struct {
+    s: Schema,
+    i: usize = 0,
+
+    pub fn next(it: *Members) ?Member {
+        const s = it.s;
+        while (it.i < s.types.len + s.functions.len + s.statics.len) {
+            const i = it.i;
+            it.i += 1;
+            const m: Member = if (i < s.types.len) blk: {
+                const t = &s.types[i];
+                if (t.nested or (t.kind != .@"struct" and t.kind != .@"enum")) continue;
+                break :blk .{ .name = t.name, .what = .{ .type = t } };
+            } else if (i < s.types.len + s.functions.len) blk: {
+                const f = &s.functions[i - s.types.len];
+                break :blk .{ .name = f.name, .what = .{ .function = f } };
+            } else blk: {
+                const v = &s.statics[i - s.types.len - s.functions.len];
+                break :blk .{ .name = v.name, .what = .{ .static = v } };
+            };
+            if (Schema.namespaceEnd(m.name) == null or std.mem.indexOfScalar(u8, m.name, '<') != null) continue;
+            return m;
+        }
+        return null;
+    }
+};
+
+/// Whether `path` is a struct or union, whose class has what's in a namespace of its name.
+pub fn isRecordName(s: Schema, path: []const u8) bool {
+    const t = s.findType(path) orelse return false;
+    return t.kind == .@"struct" or t.kind == .@"union";
+}
+
+/// Namespaces that aren't structs, like `Scene` and `Scene.Tools`, each once, outer ones first.
+pub const Namespaces = struct {
+    members: Members,
+    current: ?Member = null,
+    /// How much of `current`'s namespace has been given.
+    done: usize = 0,
+
+    pub fn init(s: Schema) Namespaces {
+        return .{ .members = .{ .s = s } };
+    }
+
+    pub fn next(it: *Namespaces) ?[]const u8 {
+        const s = it.members.s;
+        while (true) {
+            const m = it.current orelse {
+                it.current = it.members.next() orelse return null;
+                it.done = 0;
+                continue;
+            };
+            const path = m.parent();
+            if (it.done >= path.len) {
+                it.current = null;
+                continue;
+            }
+            const end = if (std.mem.indexOfScalarPos(u8, path, it.done + 1, '.')) |d| d else path.len;
+            it.done = end;
+            const ns = path[0..end];
+            // What's in a struct is on its class
+            if (isRecordName(s, ns)) {
+                it.current = null;
+                continue;
+            }
+            if (it.seenBefore(ns)) continue;
+            return ns;
+        }
+    }
+
+    fn seenBefore(it: *const Namespaces, ns: []const u8) bool {
+        var earlier: Members = .{ .s = it.members.s };
+        while (earlier.next()) |o| {
+            if (earlier.i >= it.members.i) return false;
+            const p = o.parent();
+            if (std.mem.eql(u8, p, ns) or (std.mem.startsWith(u8, p, ns) and p[ns.len] == '.')) return true;
+        }
+        return false;
+    }
+};
 
 /// Whether `r` is a struct or union, which scripts see as objects.
 pub fn isRecord(s: Schema, r: Schema.Ref) bool {

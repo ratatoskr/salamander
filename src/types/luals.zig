@@ -79,21 +79,68 @@ pub fn schema(w: *Writer, s: Schema, source: []const u8) Error!void {
     };
 
     try w.writeAll("---@class schema\n");
-    for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested) {
+    for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested and Schema.namespaceEnd(t.name) == null) {
         try w.print("---@field {s} schema.", .{t.name});
         try types.writeTypeName(w, t.name);
         if (t.kind == .@"struct") try w.writeAll("Class");
         try w.writeByte('\n');
     };
-    for (s.statics) |v| {
+    var roots: types.Namespaces = .init(s);
+    while (roots.next()) |ns| if (std.mem.indexOfScalar(u8, ns, '.') == null) try w.print("---@field {s} schema.ns.{s}\n", .{ ns, ns });
+    for (s.statics) |v| if (Schema.namespaceEnd(v.name) == null) {
         try doc(w, source, v.at);
         try w.print("---@field {s} ", .{v.name});
         try typeRef(w, s, v.type, .view);
         try w.writeByte('\n');
-    }
+    };
     try w.writeAll("local schema = {}\n\n");
-    for (s.functions) |f| try function(w, s, source, f);
+    for (s.functions) |f| if (Schema.namespaceEnd(f.name) == null) try function(w, s, source, f);
+    var namespaces: types.Namespaces = .init(s);
+    while (namespaces.next()) |ns| try namespaceClass(w, s, source, ns);
     try w.writeAll("return schema\n");
+}
+
+/// A namespace's class, with what's in it and the namespaces in it.
+fn namespaceClass(w: *Writer, s: Schema, source: []const u8, ns: []const u8) Error!void {
+    try w.print("---@class schema.ns.{s}\n", .{ns});
+    var inner: types.Namespaces = .init(s);
+    while (inner.next()) |sub| if (Schema.namespaceEnd(sub)) |end| if (std.mem.eql(u8, sub[0..end], ns))
+        try w.print("---@field {s} schema.ns.{s}\n", .{ sub[end + 1 ..], sub });
+    try memberFields(w, s, source, ns);
+    try w.writeAll("do\nlocal c = {}\n\n");
+    var members: types.Members = .{ .s = s };
+    while (members.next()) |m| if (std.mem.eql(u8, m.parent(), ns)) switch (m.what) {
+        .function => |f| {
+            try methodDocs(w, s, source, f.*, null);
+            if (keywords.has(m.leaf())) {
+                try w.print("c[\"{s}\"] = function(", .{m.leaf()});
+            } else try w.print("function c.{s}(", .{m.leaf()});
+            try paramNames(w, f.signature);
+            try w.writeAll(") end\n\n");
+        },
+        else => {},
+    };
+    try w.writeAll("end\n\n");
+}
+
+/// Fields for the structs, enums and statics in `ns`, a namespace or a struct's class.
+fn memberFields(w: *Writer, s: Schema, source: []const u8, ns: []const u8) Error!void {
+    var members: types.Members = .{ .s = s };
+    while (members.next()) |m| if (std.mem.eql(u8, m.parent(), ns)) switch (m.what) {
+        .type => |t| {
+            try w.print("---@field {s} schema.", .{m.leaf()});
+            try types.writeTypeName(w, t.name);
+            if (t.kind == .@"struct") try w.writeAll("Class");
+            try w.writeByte('\n');
+        },
+        .static => |v| {
+            try doc(w, source, v.at);
+            try w.print("---@field {s} ", .{m.leaf()});
+            try typeRef(w, s, v.type, .view);
+            try w.writeByte('\n');
+        },
+        .function => {},
+    };
 }
 
 /// `salamander`, as the module and a global.
@@ -238,8 +285,12 @@ fn enumNames(w: *Writer, prefix: []const u8, name: []const u8, e: Schema.Enum) E
 /// A trait's class, by its own name, with its methods.
 pub fn trait(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Trait) Error!void {
     try doc(w, source, t.at);
-    try w.print("---@class {s}", .{t.name});
-    for (t.bases, 0..) |b, i| try w.print("{s}{s}", .{ if (i == 0) " : " else ", ", b });
+    try w.writeAll("---@class ");
+    try types.writeTypeName(w, t.name);
+    for (t.bases, 0..) |b, i| {
+        try w.writeAll(if (i == 0) " : " else ", ");
+        try types.writeTypeName(w, b);
+    }
     try w.writeAll("\ndo\nlocal c = {}\n\n");
     for (t.methods) |m| try methodOn(w, s, source, m, "c", true, null);
     try w.writeAll("end\n\n");
@@ -279,6 +330,7 @@ fn viewClass(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type) E
         try typeRef(w, s, v.type, .view);
         try w.writeByte('\n');
     }
+    try memberFields(w, s, source, t.name);
     try w.writeAll("do\nlocal c = {}\n\n");
     if (s.findFunction(nameDot(t.name, "at")) == null) {
         try w.writeAll("---A live view of one at `address`. Nil at 0.\n---@param address integer\n---@return schema.");
@@ -398,14 +450,14 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
         }),
         .named => |n| {
             if (s.findTrait(n) != null) {
-                try w.writeAll(n);
+                try types.writeTypeName(w, n);
                 if (use == .in) try w.writeAll("|nil");
                 return;
             }
             const t = s.findType(n) orelse return w.writeAll("any");
             switch (t.kind) {
                 .@"enum" => {
-                    if (use != .in and use != .field) return w.writeAll(if (live) "integer" else n);
+                    if (use != .in and use != .field) return if (live) w.writeAll("integer") else types.writeTypeName(w, n);
                     try w.writeAll(if (live) "integer|schema." else "");
                     if (!live) {
                         try types.writeTypeName(w, n);
@@ -558,6 +610,34 @@ test "the schema module's live classes" {
         "---@field Player schema.PlayerClass",
         "---@field frames integer",
         "---@param mode integer|schema.ModeName\n---@return integer\nfunction schema.spawn(mode) end",
+    };
+    for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "the schema module's namespaces" {
+    const source =
+        \\namespace World {
+        \\    struct Counter { u32 n; Counter* next; [game.Sig("48")] static Counter* main; }
+        \\    namespace Inner { enum Mode : u8 { off, on } }
+        \\    [game.Sig("48")] u32 twice(u32 n);
+        \\    [game.Sig("48")] static u32 ticks;
+        \\}
+    ;
+    var parsed = try @import("salamander_schema").parse(testing.allocator, source, .{ .any_namespace = true }, null);
+    defer parsed.deinit();
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try schema(&out.writer, parsed.schema, source);
+    const text = out.written();
+    const want = [_][]const u8{
+        "---@class schema.World_Counter\n",
+        "---@field World schema.ns.World\n",
+        "---@class schema.ns.World\n---@field Inner schema.ns.World.Inner\n---@field Counter schema.World_CounterClass\n---@field ticks integer\n",
+        "function c.twice(n) end",
+        "---@class schema.ns.World.Inner\n---@field Mode schema.World_Inner_Mode\n",
     };
     for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
         std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });

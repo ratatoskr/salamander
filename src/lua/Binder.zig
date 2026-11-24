@@ -788,16 +788,17 @@ fn fillSchema(b: *Binder, l: *State, all: c_int, s: Schema) Error!void {
     for (s.types) |*t| {
         if (t.kind == .@"enum" and !t.nested) {
             // Its values by name, to combine flags
-            lua.newTable(l);
+            try b.pushTableIn(l, all, t.name);
             for (t.kind.@"enum".values) |v| {
                 c.lua_pushinteger(l, @intCast(v.value));
                 lua.rawSet(l, lua.top(l) - 1, v.name);
             }
-            lua.rawSet(l, all, t.name);
+            lua.pop(l, 1);
             continue;
         }
         if (t.kind != .@"struct" or t.nested) continue;
-        lua.newTable(l);
+        // What's in a namespace of the same name may already be on it
+        try b.pushTableIn(l, all, t.name);
         const class = lua.top(l);
         var at: ?*const Schema.Type = t;
         var depth: usize = 0;
@@ -822,14 +823,39 @@ fn fillSchema(b: *Binder, l: *State, all: c_int, s: Schema) Error!void {
             lua.pushClosure(l, classAtC, 2);
             lua.rawSet(l, class, "at");
         } else lua.pop(l, 1);
-        b.pushStatics(l, t.name);
-        _ = c.lua_setmetatable(l, class);
-        lua.rawSet(l, all, t.name);
+        lua.pop(l, 1);
     }
     for (s.functions) |f| {
+        const end = Schema.namespaceEnd(f.name);
+        if (end) |e| try b.pushTableIn(l, all, f.name[0..e]) else c.lua_pushvalue(l, all);
+        const in = lua.top(l);
         b.pushDeclared(l, f.name);
-        lua.rawSet(l, all, f.name);
+        lua.rawSet(l, in, if (end) |e| f.name[e + 1 ..] else f.name);
+        lua.pop(l, 1);
     }
+}
+
+/// Pushes the table at `path` under `all`, like `Scene.Node`, made with any on the way if they're
+/// not there. Each made one reads and writes `path`'s statics, like a struct's class does.
+fn pushTableIn(b: *Binder, l: *State, all: c_int, path: []const u8) Error!void {
+    if (c.lua_checkstack(l, 4) == 0) return error.OutOfMemory;
+    var leaf = path;
+    if (Schema.namespaceEnd(path)) |end| {
+        try b.pushTableIn(l, all, path[0..end]);
+        leaf = path[end + 1 ..];
+    } else c.lua_pushvalue(l, all);
+    const in = lua.top(l);
+    if (lua.rawGet(l, in, leaf) == c.LUA_TTABLE) {
+        lua.remove(l, in);
+        return;
+    }
+    lua.pop(l, 1);
+    lua.newTable(l);
+    b.pushStatics(l, path);
+    _ = c.lua_setmetatable(l, -2);
+    c.lua_pushvalue(l, -1);
+    lua.rawSet(l, in, leaf);
+    lua.remove(l, in);
 }
 
 /// A metatable whose `__index` and `__newindex` read and write the statics of `owner`, or the

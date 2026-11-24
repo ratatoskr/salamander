@@ -538,6 +538,75 @@ test "scripts use the game's structs live, with their methods and statics" {
     }
 }
 
+/// A game whose types are in a namespace.
+const World = struct {
+    const schema =
+        \\namespace World {
+        \\    struct Counter { u32 n; [test.Sig("90")] static Counter* main; }
+        \\    struct Box<T> { T value; u32 extra; }
+        \\    struct Shelf { Box<f32> box; }
+        \\    [test.Sig("90")] static u32 ticks;
+        \\    [test.Sig("90")] i32 twice(i32 n);
+        \\}
+    ;
+    var counter: extern struct { n: u32 = 0 } = .{};
+    var main: ?*anyopaque = null;
+    var ticks: u32 = 3;
+
+    fn twice(n: i32) callconv(.c) i32 {
+        return n * 2;
+    }
+    fn address(_: ?*anyopaque, name: []const u8) anyerror!usize {
+        if (std.mem.eql(u8, name, "World.Counter.main")) return @intFromPtr(&main);
+        if (std.mem.eql(u8, name, "World.ticks")) return @intFromPtr(&ticks);
+        if (std.mem.eql(u8, name, "World.twice")) return @intFromPtr(&twice);
+        return error.NotFound;
+    }
+};
+
+test "scripts find what's in a namespace under it" {
+    const js =
+        \\import { World, default as all } from "schema";
+        \\import { addressOf, typeOf, sizeOf } from "salamander";
+        \\const c = World.Counter.main;
+        \\c.n = 5;
+        \\all.World.ticks = all.World.ticks + 1;
+        \\globalThis.out = [c.n, World.twice(4), World.ticks, sizeOf("World.Box<f32>"), typeOf(World.Counter.at(addressOf(c)))].join(" ");
+    ;
+    const lua_source =
+        \\local schema = require("schema")
+        \\local sal = require("salamander")
+        \\local c = schema.World.Counter.main
+        \\c.n = 5
+        \\schema.World.ticks = schema.World.ticks + 1
+        \\out = table.concat({ c.n, schema.World.twice(4), schema.World.ticks, sal.sizeOf("World.Box<f32>"), sal.typeOf(schema.World.Counter.at(sal.addressOf(c))) }, " ")
+    ;
+    const sources = [_][]const u8{ js, lua_source };
+    for (&cases, sources) |*case, text| {
+        World.counter = .{};
+        World.main = &World.counter;
+        World.ticks = 3;
+        var files: Files = .{ .case = case };
+        const s = try hosts.create(case.language, .{
+            .gpa = testing.allocator,
+            .resolver = .{ .ctx = &files, .resolve = Files.resolve, .read = Files.read },
+            .report = .{ .f = onReport },
+            .schema_options = .{ .any_namespace = true },
+            .locator = .{ .address = World.address, .read = Game.read, .write = Game.write },
+        });
+        defer s.deinit();
+        _ = try s.schema(World.schema);
+        s.run(text, "world") catch |e| {
+            std.debug.print("{t}: {s}\n", .{ case.language, s.lastError() });
+            return e;
+        };
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings("5 8 4 8 World.Counter", s.eval("out", &buf).value);
+        try testing.expectEqual(5, World.counter.n);
+        try testing.expectEqual(4, World.ticks);
+    }
+}
+
 test "JS requires CommonJS files once, through the resolver" {
     const Lib = struct {
         fn resolve(_: ?*anyopaque, buf: []u8, from: []const u8, name: []const u8) ?[]const u8 {

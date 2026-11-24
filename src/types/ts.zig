@@ -76,24 +76,36 @@ pub fn schema(w: *Writer, s: Schema, source: []const u8) Error!void {
     for (s.traits) |*t| try trait(w, s, source, t);
     for (s.functions) |*f| {
         try doc(w, source, f.at, "  ");
-        try w.print("  export function {s}", .{f.name});
+        try w.writeAll("  export function ");
+        try types.writeTypeName(w, f.name);
         try signature(w, s, f.signature, f.async);
         try w.writeAll(";\n");
     }
+    // What's in namespaces, by the names scripts use
+    var namespaces: types.Namespaces = .init(s);
+    while (namespaces.next()) |ns| {
+        try w.print("  export namespace {s} {{\n", .{ns});
+        var members: types.Members = .{ .s = s };
+        while (members.next()) |m| if (std.mem.eql(u8, m.parent(), ns)) try member(w, s, source, m, "    ");
+        try w.writeAll("  }\n");
+    }
     // Statics are live, so they're only on the default export
     try w.writeAll("  const all: {\n");
-    for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested) {
-        try w.print("    {s}: typeof ", .{t.name});
+    for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested and Schema.namespaceEnd(t.name) == null) {
+        try propertyName(w, t.name);
+        try w.writeAll(": typeof ");
         try types.writeTypeName(w, t.name);
         try w.writeAll(";\n");
     };
-    for (s.functions) |f| try w.print("    {s}: typeof {s};\n", .{ f.name, f.name });
-    for (s.statics) |v| {
+    for (s.functions) |f| if (Schema.namespaceEnd(f.name) == null) try w.print("    {s}: typeof {s};\n", .{ f.name, f.name });
+    var roots: types.Namespaces = .init(s);
+    while (roots.next()) |ns| if (std.mem.indexOfScalar(u8, ns, '.') == null) try w.print("    {s}: typeof {s};\n", .{ ns, ns });
+    for (s.statics) |v| if (Schema.namespaceEnd(v.name) == null) {
         try doc(w, source, v.at, "    ");
         try w.print("    {s}: ", .{v.name});
         try typeRef(w, s, v.type, .view);
         try w.writeAll(";\n");
-    }
+    };
     try w.writeAll("  };\n  export default all;\n}\n");
 }
 
@@ -198,8 +210,12 @@ fn enumNames(w: *Writer, name: []const u8, e: Schema.Enum) Error!void {
 
 fn trait(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Trait) Error!void {
     try doc(w, source, t.at, "  ");
-    try w.print("  export interface {s}", .{t.name});
-    for (t.bases, 0..) |b, i| try w.print("{s}{s}", .{ if (i == 0) " extends " else ", ", b });
+    try w.writeAll("  export interface ");
+    try types.writeTypeName(w, t.name);
+    for (t.bases, 0..) |b, i| {
+        try w.writeAll(if (i == 0) " extends " else ", ");
+        try types.writeTypeName(w, b);
+    }
     try w.writeAll(" {\n");
     for (t.methods) |m| try method(w, s, source, m, "    ");
     try w.writeAll("  }\n");
@@ -263,6 +279,8 @@ fn viewClass(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type) E
         try typeRef(w, s, v.type, .view);
         try w.writeAll(";\n");
     }
+    var members: types.Members = .{ .s = s };
+    while (members.next()) |m| if (std.mem.eql(u8, m.parent(), t.name)) try member(w, s, source, m, "    ");
     try w.writeAll("  };\n");
 }
 
@@ -284,11 +302,47 @@ fn bitsView(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type, bf
 }
 
 /// `Name.member`, for looking things up. Long names just don't find anything.
-fn nameDot(name: []const u8, member: []const u8) []const u8 {
+fn nameDot(name: []const u8, member_name: []const u8) []const u8 {
     const S = struct {
         threadlocal var buf: [256]u8 = undefined;
     };
-    return std.fmt.bufPrint(&S.buf, "{s}.{s}", .{ name, member }) catch "";
+    return std.fmt.bufPrint(&S.buf, "{s}.{s}", .{ name, member_name }) catch "";
+}
+
+/// What's in a namespace, as the name it has there. In a struct's class it's a property, otherwise
+/// a type and a value of the same name.
+fn member(w: *Writer, s: Schema, source: []const u8, m: types.Member, indent: []const u8) Error!void {
+    const on_class = types.isRecordName(s, m.parent());
+    switch (m.what) {
+        .type, .function => {
+            if (on_class) {
+                try w.print("{s}{s}: typeof ", .{ indent, m.leaf() });
+            } else {
+                if (m.what == .type) {
+                    try w.print("{s}export type {s} = ", .{ indent, m.leaf() });
+                    try types.writeTypeName(w, m.name);
+                    try w.writeAll(";\n");
+                }
+                try w.print("{s}export const {s}: typeof ", .{ indent, m.leaf() });
+            }
+            try types.writeTypeName(w, m.name);
+            try w.writeAll(";\n");
+        },
+        .static => |v| {
+            try doc(w, source, v.at, indent);
+            try w.print("{s}{s}{s}: ", .{ indent, if (on_class) "" else "export const ", m.leaf() });
+            try typeRef(w, s, v.type, .view);
+            try w.writeAll(";\n");
+        },
+    }
+}
+
+/// A property's name, quoted if it isn't one on its own, like a generic's.
+fn propertyName(w: *Writer, n: []const u8) Error!void {
+    for (n) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return w.print("    \"{s}\"", .{n});
+    }
+    try w.print("    {s}", .{n});
 }
 
 // Signatures
@@ -366,7 +420,7 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
         }),
         .named => |n| {
             if (s.findTrait(n) != null) {
-                try w.writeAll(n);
+                try types.writeTypeName(w, n);
                 if (use == .in) try w.writeAll(" | null");
                 return;
             }
@@ -549,6 +603,35 @@ test "the schema module's live classes" {
         "  export function spawn(mode: Mode | ModeName): number;",
         "    frames: number;",
         "  export default all;",
+    };
+    for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "the schema module's namespaces" {
+    const source =
+        \\namespace World {
+        \\    struct Counter { u32 n; Counter* next; [game.Sig("48")] static Counter* main; }
+        \\    namespace Inner { enum Mode : u8 { off, on } }
+        \\    [game.Sig("48")] u32 twice(u32 n);
+        \\    [game.Sig("48")] static u32 ticks;
+        \\}
+    ;
+    var parsed = try @import("salamander_schema").parse(testing.allocator, source, .{ .any_namespace = true }, null);
+    defer parsed.deinit();
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try schema(&out.writer, parsed.schema, source);
+    const text = out.written();
+    const want = [_][]const u8{
+        "  export interface World_Counter {",
+        "    next: import(\"schema\").World_Counter | null;",
+        "  export function World_twice(n: number): number;",
+        "  export namespace World {\n    export type Counter = World_Counter;\n    export const Counter: typeof World_Counter;\n    export const twice: typeof World_twice;\n    export const ticks: number;\n  }",
+        "  export namespace World.Inner {\n    export type Mode = World_Inner_Mode;\n    export const Mode: typeof World_Inner_Mode;\n  }",
+        "    World: typeof World;",
     };
     for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
         std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });

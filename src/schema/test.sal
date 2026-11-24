@@ -125,3 +125,33 @@ impl Transform for Entity {
 }
 
 impl Named for Entity;
+
+// Types in a namespace, and generics made for what they hold
+namespace Scene {
+    struct Node {
+        u32 id;
+        Node* parent;
+        List<Node*> children;
+    }
+
+    // Like a game's vector, three pointers into one block
+    struct List<T> {
+        T* first;
+        T* last;
+        T* end;
+    }
+
+    struct Entry<K, V> { K key; V value; }
+
+    struct Map<K, V> { List<Entry<K, V>> entries; u32 count; }
+
+    struct Graph {
+        Map<u32, Node*> byId;
+        List<Vec3> points;
+        [wraith.Sig("90")] static i32 sum(u32 a, u32 b);
+    }
+
+    trait Picker {
+        Node* pick(u32 id);
+    }
+}

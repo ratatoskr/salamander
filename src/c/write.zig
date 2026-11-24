@@ -92,9 +92,7 @@ const Gen = struct {
     }
 
     fn name(g: *Gen, n: []const u8) Error![]const u8 {
-        const out = try std.fmt.allocPrint(g.a, "{s}{s}", .{ g.o.prefix, n });
-        std.mem.replaceScalar(u8, out, '.', '_');
-        return out;
+        return std.fmt.allocPrint(g.a, "{s}{s}", .{ g.o.prefix, try Schema.flatName(g.a, n) });
     }
 
     /// One of `core.sal`'s, which always has the core prefix.

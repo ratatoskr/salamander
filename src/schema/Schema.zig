@@ -15,6 +15,9 @@ constants: []const Constant = &.{},
 functions: []const Method = &.{},
 /// Existing code's globals, found the same way.
 statics: []const Static = &.{},
+/// Indices of the first `type_order.len` types, sorted by name, so `findType` needn't look at each.
+/// Types after them are looked at one by one.
+type_order: []const u32 = &.{},
 
 /// Byte offset into the source, for messages.
 pub const Pos = u32;
@@ -460,6 +463,62 @@ pub const cancelled_code: u32 = std.math.maxInt(u32) - 2;
 pub const unsupported_code: u32 = std.math.maxInt(u32) - 1;
 pub const gone_code: u32 = std.math.maxInt(u32);
 
+/// Where `name`'s namespace ends, like the last dot in `Scene.Node`, skipping dots in a generic's
+/// `<..>`. Null for a name at the top.
+pub fn namespaceEnd(name: []const u8) ?usize {
+    var depth: usize = 0;
+    var i = name.len;
+    while (i > 0) {
+        i -= 1;
+        switch (name[i]) {
+            '>' => depth += 1,
+            '<' => depth -|= 1,
+            '.' => if (depth == 0) return i,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// A name as one identifier, for languages without namespaces or generics. `Game.Player` is
+/// `Game_Player` and `StdVector<Item*, u32[4]>` is `StdVector_ItemPtr_u32_4`. Plain names stay as they are.
+pub fn writeFlatName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
+    var i: usize = 0;
+    while (i < name.len) : (i += 1) {
+        const c = name[i];
+        if (std.ascii.isAlphanumeric(c) or c == '_') {
+            try w.writeByte(c);
+            continue;
+        }
+        switch (c) {
+            '*' => try w.writeAll("Ptr"),
+            '?' => try w.writeAll("Opt_"),
+            '!' => try w.writeAll("_Or_"),
+            '>', ']', ' ' => {},
+            '[' => if (i + 1 < name.len and name[i + 1] == ']') {
+                try w.writeAll("Slice_");
+                i += 1;
+            } else try w.writeByte('_'),
+            ',' => {
+                try w.writeByte('_');
+                while (i + 1 < name.len and name[i + 1] == ' ') i += 1;
+            },
+            else => try w.writeByte('_'),
+        }
+    }
+}
+
+/// `writeFlatName`'s, or `name` itself when it's already one identifier.
+pub fn flatName(gpa: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const u8 {
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') break;
+    } else return name;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    writeFlatName(&out.writer, name) catch return error.OutOfMemory;
+    return out.toOwnedSlice();
+}
+
 const Fnv = struct {
     h: u64 = 0xcbf29ce484222325,
 
@@ -537,7 +596,29 @@ pub fn traitHash(s: Schema, t: *const Trait) u64 {
 }
 
 pub fn findType(s: Schema, name: []const u8) ?*const Type {
-    for (s.types) |*t| if (std.mem.eql(u8, t.name, name)) return t;
+    const order = s.type_order;
+    var lo: usize = 0;
+    var hi: usize = order.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        const t = &s.types[order[mid]];
+        switch (std.mem.order(u8, t.name, name)) {
+            .eq => return t,
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+        }
+    }
+    for (s.types[order.len..]) |*t| if (std.mem.eql(u8, t.name, name)) return t;
+    return null;
+}
+
+/// Where the type `path` starts with ends, the longest that is one, like `Game.Party` in
+/// `Game.Party.members.count`. Null if it doesn't start with one followed by a `.`.
+pub fn typePrefix(s: Schema, path: []const u8) ?usize {
+    var end = path.len;
+    while (std.mem.lastIndexOfScalar(u8, path[0..end], '.')) |dot| : (end = dot) {
+        if (s.findType(path[0..dot]) != null) return dot;
+    }
     return null;
 }
 
@@ -612,12 +693,11 @@ pub const Function = struct {
     }
 };
 
-/// `spawn` or `Player.heal`, where a struct's comes from it or its bases.
+/// `spawn` or `Player.heal`, where a struct's comes from it or its bases. Names can be in
+/// namespaces, like `Game.spawn` or `Game.Player.heal`.
 pub fn findFunction(s: Schema, name: []const u8) ?Function {
-    const dot = std.mem.indexOfScalar(u8, name, '.') orelse {
-        for (s.functions) |*f| if (std.mem.eql(u8, f.name, name)) return .{ .method = f };
-        return null;
-    };
+    for (s.functions) |*f| if (std.mem.eql(u8, f.name, name)) return .{ .method = f };
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;
     return s.methodOf(s.findType(name[0..dot]) orelse return null, name[dot + 1 ..]);
 }
 
@@ -644,10 +724,8 @@ pub const FoundStatic = struct {
 
 /// `player` or `Player.instance`, where a struct's comes from it or its bases.
 pub fn findStatic(s: Schema, name: []const u8) ?FoundStatic {
-    const dot = std.mem.indexOfScalar(u8, name, '.') orelse {
-        for (s.statics) |*v| if (std.mem.eql(u8, v.name, name)) return .{ .static = v };
-        return null;
-    };
+    for (s.statics) |*v| if (std.mem.eql(u8, v.name, name)) return .{ .static = v };
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;
     return s.staticOf(s.findType(name[0..dot]) orelse return null, name[dot + 1 ..]);
 }
 

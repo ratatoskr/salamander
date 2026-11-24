@@ -8,7 +8,23 @@ const plan = salamander_schema.plan;
 
 const Schema = salamander_schema.Schema;
 const Ref = Schema.Ref;
-const id = std.zig.fmtId;
+/// A name as Zig has it, namespaces and generics flattened like `Schema.writeFlatName`.
+fn id(n: []const u8) Id {
+    return .{ .n = n };
+}
+
+const Id = struct {
+    n: []const u8,
+
+    pub fn format(self: Id, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        // Only what's in a namespace or generic. Others keep their spelling, like an impl's label.
+        if (std.mem.indexOfAny(u8, self.n, ".<") == null) return w.print("{f}", .{std.zig.fmtId(self.n)});
+        var buf: [4096]u8 = undefined;
+        var flat: std.Io.Writer = .fixed(&buf);
+        Schema.writeFlatName(&flat, self.n) catch return error.WriteFailed;
+        try w.print("{f}", .{std.zig.fmtId(flat.buffered())});
+    }
+};
 
 pub const Error = std.Io.Writer.Error || error{ OutOfMemory, NameClash };
 
@@ -52,6 +68,95 @@ const Gen = struct {
     lifted: std.ArrayList([]const u8) = .empty,
     /// Writing `raw`, where every name's qualified.
     in_raw: bool = false,
+    /// What's in a namespace, so `Scene.Node` works as well as `Scene_Node`.
+    members: std.ArrayList(Member) = .empty,
+
+    const Member = struct {
+        /// Like `Scene`, or a struct's name for what's declared inside it.
+        parent: []const u8,
+        /// Like `Node`.
+        leaf: []const u8,
+        /// Its flattened name at the top.
+        target: []const u8,
+    };
+
+    const lastDot = Schema.namespaceEnd;
+
+    fn addMember(g: *Gen, name: []const u8) Error!void {
+        const dot = lastDot(name) orelse return;
+        try g.members.append(g.a, .{ .parent = name[0..dot], .leaf = name[dot + 1 ..], .target = try g.typeName(name) });
+    }
+
+    fn isNamespace(g: *const Gen, path: []const u8) bool {
+        for (g.members.items) |m| if (std.mem.eql(u8, m.parent, path) or (std.mem.startsWith(u8, m.parent, path) and m.parent.len > path.len and m.parent[path.len] == '.')) return true;
+        return false;
+    }
+
+    /// Whether `path` is a struct or union, whose members go in its own body.
+    fn isRecord(g: *const Gen, path: []const u8) bool {
+        const t = g.s.findType(path) orelse return false;
+        return t.kind == .@"struct" or t.kind == .@"union";
+    }
+
+    /// Every namespace's members, from the ones at the top.
+    fn findMembers(g: *Gen) Error!void {
+        for (g.s.types) |t| {
+            if (t.nested) continue;
+            try g.addMember(t.name);
+            if (t.kind == .@"error") try g.addMember(try g.codeName(t.name));
+        }
+        for (g.s.traits) |t| try g.addMember(t.name);
+        for (g.s.constants) |k| try g.addMember(k.name);
+        for (g.s.functions) |f| try g.addMember(f.name);
+        for (g.s.statics) |v| {
+            try g.addMember(v.name);
+            if (v.type == .pointer) try g.addMember(try std.fmt.allocPrint(g.a, "{s}OrFail", .{v.name}));
+        }
+        // A namespace that's also something else can only be a struct's, in its body
+        for (g.members.items) |m| {
+            var path = m.parent;
+            while (true) {
+                if (g.s.findType(path) != null or g.s.findTrait(path) != null or g.s.findConstant(path) != null) {
+                    if (!g.isRecord(path)) {
+                        g.diag.print("{s}: Zig can't have it be a namespace too, since only structs and unions have room for what's in them", .{path});
+                        return error.NameClash;
+                    }
+                }
+                path = path[0 .. lastDot(path) orelse break];
+            }
+            const root = m.parent[0 .. std.mem.indexOfScalar(u8, m.parent, '.') orelse m.parent.len];
+            if (!g.isRecord(root) and !contains(g.top.items, root)) try g.top.append(g.a, root);
+        }
+    }
+
+    /// `pub const Node = generated.Scene_Node;` for each of `path`'s, and its namespaces as structs.
+    fn namespaceMembers(g: *Gen, path: []const u8, indent: []const u8, names: ?*std.ArrayList([]const u8)) Error!void {
+        const w = g.w;
+        var subs: std.ArrayList([]const u8) = .empty;
+        for (g.members.items) |m| {
+            if (std.mem.eql(u8, m.parent, path)) {
+                if (names) |list| try g.claim(list, path, m.leaf);
+                try w.print("{s}pub const {f} = generated.{f};\n", .{ indent, id(m.leaf), id(m.target) });
+                continue;
+            }
+            // The namespace right under `path` that it's in
+            if (path.len > 0 and !(std.mem.startsWith(u8, m.parent, path) and m.parent.len > path.len and m.parent[path.len] == '.')) continue;
+            const rest = if (path.len == 0) m.parent else m.parent[path.len + 1 ..];
+            const seg = rest[0 .. std.mem.indexOfScalar(u8, rest, '.') orelse rest.len];
+            const sub = if (path.len == 0) seg else try std.fmt.allocPrint(g.a, "{s}.{s}", .{ path, seg });
+            // A struct's own go in its body
+            if (g.isRecord(sub) or contains(subs.items, sub)) continue;
+            try subs.append(g.a, sub);
+        }
+        const inner = try std.fmt.allocPrint(g.a, "{s}    ", .{indent});
+        for (subs.items) |sub| {
+            const seg = sub[if (lastDot(sub)) |d| d + 1 else 0..];
+            if (names) |list| try g.claim(list, path, seg);
+            try w.print("{s}pub const {f} = struct {{\n", .{ indent, id(seg) });
+            try g.namespaceMembers(sub, inner, null);
+            try w.print("{s}}};\n", .{indent});
+        }
+    }
 
     fn isLifted(g: *const Gen, n: []const u8) bool {
         return contains(g.lifted.items, n);
@@ -163,12 +268,12 @@ const Gen = struct {
             try g.claim(&g.top, "", try g.typeName(t.name));
             if (t.kind == .@"error") try g.claim(&g.top, "", try g.codeName(t.name));
         }
-        for (s.traits) |t| try g.claim(&g.top, "", t.name);
-        for (s.constants) |k| try g.claim(&g.top, "", k.name);
-        for (s.functions) |f| try g.claim(&g.top, "", f.name);
+        for (s.traits) |t| try g.claim(&g.top, "", try g.typeName(t.name));
+        for (s.constants) |k| try g.claim(&g.top, "", try g.typeName(k.name));
+        for (s.functions) |f| try g.claim(&g.top, "", try g.typeName(f.name));
         for (s.statics) |v| {
-            try g.claim(&g.top, "", v.name);
-            if (v.type == .pointer) try g.claim(&g.top, "", try std.fmt.allocPrint(g.a, "{s}OrFail", .{v.name}));
+            try g.claim(&g.top, "", try g.typeName(v.name));
+            if (v.type == .pointer) try g.claim(&g.top, "", try g.typeName(try std.fmt.allocPrint(g.a, "{s}OrFail", .{v.name})));
         }
         if (s.functions.len + s.statics.len > 0) {
             try g.claim(&g.top, "", "addresses");
@@ -177,6 +282,7 @@ const Gen = struct {
         if (hasGameCode(s)) try g.claim(&g.top, "", "resolve");
         try g.claim(&g.top, "", "raw");
         try g.claim(&g.top, "", "generated");
+        try g.findMembers();
         try g.findLifted();
 
         for (s.types) |*t| {
@@ -216,6 +322,10 @@ const Gen = struct {
         if (s.impls.len > 0) try g.impls();
         try g.globals();
         if (g.finds.items.len > 0) try g.resolveFn();
+        if (g.members.items.len > 0) {
+            try g.w.writeAll("\n// Namespaces, with what's in them\n");
+            try g.namespaceMembers("", "", null);
+        }
         try g.rawNamespace();
     }
 
@@ -261,6 +371,7 @@ const Gen = struct {
             try g.plainDefault(f.type);
             try w.writeAll(",\n");
         };
+        try g.namespaceMembers(t.name, "    ", &names);
         try w.writeAll("};\n");
     }
 
@@ -329,10 +440,7 @@ const Gen = struct {
     }
 
     fn typeName(g: *Gen, n: []const u8) Error![]const u8 {
-        if (std.mem.indexOfScalar(u8, n, '.') == null) return n;
-        const out = try g.a.dupe(u8, n);
-        std.mem.replaceScalar(u8, out, '.', '_');
-        return out;
+        return Schema.flatName(g.a, n);
     }
 
     fn codeName(g: *Gen, n: []const u8) Error![]const u8 {
@@ -500,6 +608,7 @@ const Gen = struct {
             try w.print("        return @as([*]{s}{s}, @ptrCast(&self.{f}))[0..@intCast(@max(self.{f}, 0))];\n    }}\n", .{ al, elem, id(c.field), id(c.count) });
         }
         if (t.kind == .@"struct") try g.gameCode(t, &names);
+        if (!g.in_raw) try g.namespaceMembers(t.name, "    ", &names);
         try w.writeAll("};\n");
     }
 
@@ -620,9 +729,9 @@ const Gen = struct {
             \\/// after trying them all.
             \\pub fn resolve() anyerror!void {
             \\    var first: ?anyerror = null;
-            \\    inline for (.{
             \\
         );
+        try w.print("    @setEvalBranchQuota({d});\n    inline for (.{{\n", .{1000 + 10 * g.finds.items.len});
         for (g.finds.items) |f| try w.print("        {s},\n", .{f});
         try w.writeAll(
             \\    }) |find| {
@@ -922,7 +1031,7 @@ const Gen = struct {
             const t = g.s.findTrait(im.trait).?;
             var buf: [plan.max_methods]*const Schema.Method = undefined;
             const ms = plan.methods(g.s, t, &buf);
-            const label = try std.fmt.allocPrint(g.a, "{s} for {s}", .{ im.trait, im.@"for" });
+            const label = try std.fmt.allocPrint(g.a, "{s} for {s}", .{ try g.typeName(im.trait), try g.typeName(im.@"for") });
             try w.print("    pub fn {f}() *rt.Table({f}) {{\n        return rt.mapped({f}, &.{{\n", .{ id(label), id(im.trait), id(im.trait) });
             for (ms) |m| {
                 try w.print("            .{{ .method = \"{s}\", .how = ", .{m.name});

@@ -118,7 +118,7 @@ fn one(gpa: std.mem.Allocator, parsed: *const parser.Parsed, change: Change) Err
             } else {
                 const open = try bodyOpen(text, t);
                 const close = try matching(text, open, '{', '}');
-                const ls = lineStart(text, try at(text, t.name));
+                const ls = lineStart(text, t.at);
                 const outer = leading(text[ls..]);
                 if (blank(text[open + 1 .. close])) {
                     patches.add(.{ .at = open + 1, .cut = close - open - 1, .put = try std.mem.concat(a, u8, &.{ "\n", outer, "    ", stmt, "\n", outer }) });
@@ -265,8 +265,8 @@ fn statementEnd(text: []const u8, f: Schema.Field) Error!usize {
 }
 
 fn bodyOpen(text: []const u8, t: *const Schema.Type) Error!usize {
-    const name = try at(text, t.name);
-    return std.mem.indexOfScalarPos(u8, text, name + t.name.len, '{') orelse error.NotInSource;
+    if (t.at >= text.len) return error.NotInSource;
+    return std.mem.indexOfScalarPos(u8, text, t.at, '{') orelse error.NotInSource;
 }
 
 /// Matching close bracket, skipping strings.

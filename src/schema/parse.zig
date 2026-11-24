@@ -56,7 +56,10 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, options: Options, diagn
     errdefer arena.deinit();
     const text = try arena.allocator().dupe(u8, source);
     var p: Parser = .init(text, diag, options, arena.allocator());
+    try p.findNamespaces();
     var schema = try p.file();
+    try p.resolve(&schema);
+    schema.type_order = try p.typeOrder(schema.types);
     try p.layout(&schema);
     try check(schema, text, diag);
     return .{ .arena = arena, .schema = schema, .source = text };
@@ -77,7 +80,7 @@ const Token = struct {
     start: usize,
     end: usize,
 
-    const Tag = enum { ident, number, string, l_bracket, r_bracket, l_paren, r_paren, l_brace, r_brace, comma, semicolon, colon, equal, star, minus, question, bang, dot, eof, invalid };
+    const Tag = enum { ident, number, string, l_bracket, r_bracket, l_paren, r_paren, l_brace, r_brace, comma, semicolon, colon, equal, star, minus, question, bang, dot, lt, gt, eof, invalid };
 };
 
 fn isIdentChar(c: u8) bool {
@@ -137,6 +140,8 @@ fn scan(source: []const u8, at: usize) Token {
         '?' => .question,
         '!' => .bang,
         '.' => .dot,
+        '<' => .lt,
+        '>' => .gt,
         else => .invalid,
     };
     return .{ .tag = tag, .start = start, .end = start + 1 };
@@ -206,6 +211,38 @@ const Parser = struct {
     opts: Options,
     arena: std.mem.Allocator,
     uses: []const []const u8 = &.{},
+    /// The namespace what's declared now goes in, like `Client.Game`. Empty at the top.
+    ns: []const u8 = "",
+    /// Outer namespaces of the `namespace X { }` blocks we're in.
+    blocks: std.ArrayList([]const u8) = .empty,
+    /// This file's `use`s of namespaces types are declared in, not tools'.
+    type_uses: []const []const u8 = &.{},
+    /// Every namespace a file declares, and the ones around them, so `use` knows which are types'.
+    declared_namespaces: std.StringHashMapUnmanaged(void) = .empty,
+    /// Where each namespace and file's `use`s start, in order, so names resolve where they're written.
+    regions: std.ArrayList(Region) = .empty,
+    /// Generic structs and unions, made into types for each set of types they're used with.
+    templates: std.ArrayList(Template) = .empty,
+    /// `Name<..>` as written, with its parts.
+    generic_uses: std.StringHashMapUnmanaged(GenericUse) = .empty,
+    /// Every type's index by name, once resolved.
+    index: std.StringHashMapUnmanaged(u32) = .empty,
+
+    const Region = struct {
+        start: usize,
+        ns: []const u8,
+        uses: []const []const u8,
+    };
+
+    const Template = struct {
+        type: Schema.Type,
+        params: []const []const u8,
+    };
+
+    const GenericUse = struct {
+        name: []const u8,
+        args: []const Ref,
+    };
 
     fn init(source: []const u8, diag: *Schema.Diagnostic, opts: Options, arena: std.mem.Allocator) P {
         return .{ .source = source, .tok = scan(source, 0), .diag = diag, .opts = opts, .arena = arena };
@@ -303,6 +340,130 @@ const Parser = struct {
 
     fn optionalSemicolon(p: *P) void {
         if (p.tok.tag == .semicolon) _ = p.advance();
+    }
+
+    // Namespaces
+
+    /// `A` or `A.B.C`, without spaces.
+    fn dottedName(p: *P, comptime what: []const u8) Error![]const u8 {
+        const first = try p.expect(.ident, what);
+        if (p.tok.tag != .dot) return p.text(first);
+        var parts: std.ArrayList(u8) = .empty;
+        try parts.appendSlice(p.arena, p.text(first));
+        var end = first.end;
+        while (p.tok.tag == .dot and p.peek().tag == .ident) {
+            _ = p.advance();
+            const next = p.advance();
+            try parts.print(p.arena, ".{s}", .{p.text(next)});
+            end = next.end;
+        }
+        // The source's own slice when it's written without spaces
+        if (std.mem.eql(u8, p.source[first.start..end], parts.items)) return p.source[first.start..end];
+        return parts.toOwnedSlice(p.arena);
+    }
+
+    fn qualify(p: *P, ns: []const u8, n: []const u8) Error![]const u8 {
+        if (ns.len == 0) return n;
+        return p.dotted(ns, n);
+    }
+
+    /// What's declared here is called, inside the namespace.
+    fn declName(p: *P, n: []const u8) Error![]const u8 {
+        return p.qualify(p.ns, n);
+    }
+
+    /// Every `namespace X` in the source, before parsing, so a `use` of one is known to be types'.
+    fn findNamespaces(p: *P) Error!void {
+        // Each open block's namespace and the depth of its braces
+        var open: std.ArrayList(struct { ns: []const u8, depth: usize }) = .empty;
+        var file_ns: []const u8 = "";
+        var depth: usize = 0;
+        var tok = scan(p.source, 0);
+        while (tok.tag != .eof) : (tok = scan(p.source, tok.end)) {
+            switch (tok.tag) {
+                .l_brace => depth += 1,
+                .r_brace => {
+                    depth -|= 1;
+                    if (open.items.len > 0 and open.items[open.items.len - 1].depth == depth) _ = open.pop();
+                },
+                .ident => {},
+                else => continue,
+            }
+            if (tok.tag != .ident) continue;
+            if (std.mem.eql(u8, p.text(tok), "file") and scan(p.source, tok.end).tag == .string) {
+                open.clearRetainingCapacity();
+                file_ns = "";
+                depth = 0;
+                continue;
+            }
+            if (!std.mem.eql(u8, p.text(tok), "namespace")) continue;
+            const outer = if (open.items.len > 0) open.items[open.items.len - 1].ns else file_ns;
+            var next = scan(p.source, tok.end);
+            if (next.tag != .ident) continue;
+            var full: std.ArrayList(u8) = .empty;
+            try full.appendSlice(p.arena, outer);
+            while (true) {
+                if (full.items.len > 0) try full.append(p.arena, '.');
+                try full.appendSlice(p.arena, p.text(next));
+                try p.declared_namespaces.put(p.arena, try p.arena.dupe(u8, full.items), {});
+                const after = scan(p.source, next.end);
+                if (after.tag != .dot) {
+                    tok = next;
+                    if (after.tag == .semicolon) {
+                        file_ns = try p.arena.dupe(u8, full.items);
+                    } else if (after.tag == .l_brace) {
+                        try open.append(p.arena, .{ .ns = try p.arena.dupe(u8, full.items), .depth = depth });
+                        depth += 1;
+                        tok = after;
+                    }
+                    break;
+                }
+                next = scan(p.source, after.end);
+                if (next.tag != .ident) {
+                    tok = after;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn pushRegion(p: *P) Error!void {
+        try p.regions.append(p.arena, .{ .start = p.tok.start, .ns = p.ns, .uses = p.type_uses });
+    }
+
+    /// The namespace and `use`s where `at` is.
+    fn regionAt(p: *const P, at: usize) Region {
+        const list = p.regions.items;
+        var lo: usize = 0;
+        var hi: usize = list.len;
+        while (lo < hi) {
+            const mid = (lo + hi) / 2;
+            if (list[mid].start <= at) lo = mid + 1 else hi = mid;
+        }
+        return if (lo == 0) .{ .start = 0, .ns = "", .uses = &.{} } else list[lo - 1];
+    }
+
+    /// `namespace A.B;` for the rest of the file, or `namespace A.B { .. }`.
+    fn namespaceDecl(p: *P, a: Anns) Error!void {
+        const kw = p.advance();
+        try p.allow(a, &.{}, "a namespace");
+        if (a.extra.len > 0 or a.pointer_size != null) return p.fail(kw.start, "a namespace can't have annotations", .{});
+        const n = try p.dottedName("the namespace's name");
+        if (p.tok.tag == .semicolon) {
+            _ = p.advance();
+            if (p.blocks.items.len > 0) return p.fail(kw.start, "`namespace {s};` is for the whole file, so it can't go in a namespace's {{ }}", .{n});
+            p.ns = n;
+        } else {
+            _ = try p.expect(.l_brace, "';' or '{{'");
+            try p.blocks.append(p.arena, p.ns);
+            p.ns = try p.qualify(p.ns, n);
+        }
+        try p.pushRegion();
+    }
+
+    fn endFile(p: *P) Error!void {
+        if (p.blocks.items.len > 0) return p.fail(p.tok.start, "namespace {s} needs a '}}'", .{p.ns});
+        p.ns = "";
     }
 
     fn registered(p: *const P, ns: []const u8) ?Namespace {
@@ -440,12 +601,31 @@ const Parser = struct {
 
     // Types
 
+    /// A type's name, like `Player`, `Scene.Object` or `StdVector<Item*>`. A generic one is named
+    /// as it's written until it's resolved.
+    fn namedType(p: *P, comptime what: []const u8) Error![]const u8 {
+        const start = p.tok.start;
+        const n = try p.dottedName(what);
+        if (p.tok.tag != .lt) return n;
+        _ = p.advance();
+        var args: List(Ref) = .{};
+        while (true) {
+            try args.append(p, try p.typeRef());
+            if (p.tok.tag != .comma) break;
+            _ = p.advance();
+        }
+        const close = try p.expect(.gt, "',' or '>'");
+        const written = p.source[start..close.end];
+        const gop = try p.generic_uses.getOrPut(p.arena, written);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .name = n, .args = try args.done(p) };
+        return written;
+    }
     fn typeRef(p: *P) Error!Ref {
         var r = try p.typeNoResult();
         if (p.tok.tag == .bang) {
             _ = p.advance();
             const ok = try p.box(Ref, r);
-            r = .{ .result = .{ .ok = ok, .err = try p.name("an error set's name, like 'T!LoadError'") } };
+            r = .{ .result = .{ .ok = ok, .err = try p.dottedName("an error set's name, like 'T!LoadError'") } };
         }
         return r;
     }
@@ -466,8 +646,7 @@ const Parser = struct {
             const ret = try p.typeRef();
             return .{ .func = try p.box(Schema.Signature, .{ .params = params, .ret = ret }) };
         }
-        const tok = try p.expect(.ident, "a type");
-        const t = p.text(tok);
+        const t = try p.namedType("a type");
         var r: Ref = if (std.meta.stringToEnum(Schema.Prim, t)) |prim| .{ .prim = prim } else .{ .named = t };
         while (true) switch (p.tok.tag) {
             .star => {
@@ -536,14 +715,21 @@ const Parser = struct {
     /// The `use`s at the top of a file, or of each file in a bundle, after a tool's own.
     fn uses_(p: *P) Error!void {
         var uses: List([]const u8) = .{};
+        var type_uses: List([]const u8) = .{};
         for (p.opts.uses) |u| try p.useNamespace(&uses, 0, u);
         while (p.isKeyword("use")) {
             const at = p.advance().start;
-            const ns = try p.name("a namespace");
-            try p.useNamespace(&uses, at, ns);
+            const ns = try p.dottedName("a namespace");
+            if (p.declared_namespaces.contains(ns)) {
+                try type_uses.append(p, ns);
+                // A tool's too if it registered it
+                if (p.registered(ns) != null) try p.useNamespace(&uses, at, ns);
+            } else try p.useNamespace(&uses, at, ns);
             _ = try p.expect(.semicolon, "';'");
         }
         p.uses = try uses.done(p);
+        p.type_uses = try type_uses.done(p);
+        try p.pushRegion();
     }
 
     fn file(p: *P) Error!Schema {
@@ -558,12 +744,19 @@ const Parser = struct {
         var functions: List(Schema.Method) = .{};
         var statics: List(Schema.Static) = .{};
         while (p.tok.tag != .eof) {
+            // The end of a `namespace X { }`
+            if (p.tok.tag == .r_brace and p.blocks.items.len > 0) {
+                _ = p.advance();
+                p.ns = p.blocks.pop().?;
+                try p.pushRegion();
+                continue;
+            }
             var a = try p.anns();
             // Declarations for the other kind of code are parsed, then dropped
             const only = a.pointer_size;
             a.at[@backingInt(Core.x64)] = null;
             a.at[@backingInt(Core.x86)] = null;
-            const before = .{ types.all().len, traits.all().len, impls.all().len, constants.all().len, functions.all().len, statics.all().len };
+            const before = .{ types.all().len, traits.all().len, impls.all().len, constants.all().len, functions.all().len, statics.all().len, p.templates.items.len };
             defer if (only) |size| if (size != p.opts.pointer_size) {
                 types.truncate(before[0]);
                 traits.truncate(before[1]);
@@ -571,9 +764,16 @@ const Parser = struct {
                 constants.truncate(before[3]);
                 functions.truncate(before[4]);
                 statics.truncate(before[5]);
+                p.templates.shrinkRetainingCapacity(before[6]);
             };
             if (p.isKeyword("struct") or p.isKeyword("union")) {
-                try types.append(p, try p.structDef(a, &types));
+                var params: []const []const u8 = &.{};
+                const t = try p.structDef(a, &types, &params);
+                if (params.len > 0) {
+                    try p.templates.append(p.arena, .{ .type = t, .params = params });
+                } else try types.append(p, t);
+            } else if (p.isKeyword("namespace")) {
+                try p.namespaceDecl(a);
             } else if (p.isKeyword("enum")) {
                 try types.append(p, try p.enumDef(a));
             } else if (p.isKeyword("bitfield")) {
@@ -583,7 +783,7 @@ const Parser = struct {
             } else if (p.isKeyword("opaque")) {
                 const kw = p.advance();
                 try p.allow(a, &.{}, "an opaque type");
-                const n = try p.name("the type's name");
+                const n = try p.declName(try p.name("the type's name"));
                 _ = try p.expect(.semicolon, "';'");
                 try types.append(p, .{ .name = n, .at = @intCast(kw.start), .annotations = a.extra, .kind = .@"opaque" });
             } else if (p.isKeyword("fn")) {
@@ -591,7 +791,7 @@ const Parser = struct {
                 const kw = p.advance();
                 try p.allow(a, &convs, "a function type");
                 const ret = try p.typeRef();
-                const n = try p.name("the function type's name");
+                const n = try p.declName(try p.name("the function type's name"));
                 const params = try p.paramList();
                 _ = try p.expect(.semicolon, "';'");
                 try types.append(p, .{ .name = n, .at = @intCast(kw.start), .annotations = a.extra, .kind = .{ .func = .{ .params = params, .ret = ret, .conv = a.conv orelse .c } } });
@@ -604,6 +804,7 @@ const Parser = struct {
             } else if (p.isKeyword("file")) {
                 // The next file in a bundle, with its own `use`s
                 try p.allow(a, &.{}, "a file");
+                try p.endFile();
                 try p.fileMarker();
                 try p.uses_();
             } else if (p.isKeyword("use")) {
@@ -612,19 +813,20 @@ const Parser = struct {
                 // A global in existing code, like `[Sig("..")] static Player* player;`
                 const at = p.advance().start;
                 const ty = try p.typeRef();
-                const n = try p.name("the static's name");
+                const n = try p.declName(try p.name("the static's name"));
                 try statics.append(p, try p.gameStatic(a, ty, n, at));
             } else if (p.tok.tag == .ident or p.tok.tag == .question) {
                 // A function in existing code, like `[Sig("..")] i32 spawn(u32 kind);`
                 const at = p.tok.start;
                 const ret = try p.typeRef();
-                const n = try p.name("the function's name");
-                if (p.tok.tag != .l_paren) return p.fail(at, "expected struct, union, enum, bitfield, error, opaque, fn, trait, impl, const, static or a function like 'i32 spawn(u32 kind);'", .{});
+                const n = try p.declName(try p.name("the function's name"));
+                if (p.tok.tag != .l_paren) return p.fail(at, "expected struct, union, enum, bitfield, error, opaque, fn, trait, impl, const, static, namespace or a function like 'i32 spawn(u32 kind);'", .{});
                 try functions.append(p, try p.gameMethod(a, ret, n, at, false, true));
             } else {
-                return p.unexpected("struct, union, enum, bitfield, error, opaque, fn, trait, impl, const, static or a function");
+                return p.unexpected("struct, union, enum, bitfield, error, opaque, fn, trait, impl, const, static, namespace or a function");
             }
         }
+        try p.endFile();
         return .{
             .pointer_size = p.opts.pointer_size,
             .uses = first_uses,
@@ -644,17 +846,35 @@ const Parser = struct {
         _ = try p.expect(.semicolon, "';'");
     }
 
-    /// A field's own bitfield goes in `types` too.
-    fn structDef(p: *P, a: Anns, types: *List(Schema.Type)) Error!Schema.Type {
+    /// A field's own bitfield goes in `types` too. A generic one's type parameters go in `params`.
+    fn structDef(p: *P, a: Anns, types: *List(Schema.Type), params: *[]const []const u8) Error!Schema.Type {
         const is_union = p.isKeyword("union");
         const kw = p.advance();
         try p.allow(a, &.{.size}, if (is_union) "a union" else "a struct");
-        const type_name = try p.name("the type's name");
+        const type_name = try p.declName(try p.name("the type's name"));
+        if (p.tok.tag == .lt) {
+            _ = p.advance();
+            var list: List([]const u8) = .{};
+            while (true) {
+                const at = p.tok.start;
+                const n = try p.name("a type parameter, like T");
+                if (std.meta.stringToEnum(Schema.Prim, n) != null) return p.fail(at, "{s} is already a type, so pick another name for the parameter", .{n});
+                for (list.all()) |o| if (std.mem.eql(u8, o, n)) return p.fail(at, "{s} already has a parameter {s}", .{ type_name, n });
+                try list.append(p, n);
+                if (p.tok.tag == .comma) {
+                    _ = p.advance();
+                    continue;
+                }
+                _ = try p.expect(.gt, "',' or '>'");
+                break;
+            }
+            params.* = try list.done(p);
+        }
         var s: Schema.Struct = .{};
         if (p.tok.tag == .colon) {
             if (is_union) return p.fail(p.tok.start, "a union can't have a base", .{});
             _ = p.advance();
-            s.base = try p.name("a base type");
+            s.base = try p.namedType("a base type");
         }
         _ = try p.expect(.l_brace, "'{{'");
         var fields: List(Schema.Field) = .{};
@@ -761,7 +981,7 @@ const Parser = struct {
     fn enumDef(p: *P, a: Anns) Error!Schema.Type {
         const kw = p.advance();
         try p.allow(a, &.{}, "an enum");
-        const type_name = try p.name("the type's name");
+        const type_name = try p.declName(try p.name("the type's name"));
         const backing = try p.backingType("enum Job : u8");
         _ = try p.expect(.l_brace, "'{{'");
         var values: List(Schema.Enum.Value) = .{};
@@ -785,7 +1005,7 @@ const Parser = struct {
     fn bitfieldDef(p: *P, a: Anns) Error!Schema.Type {
         const kw = p.advance();
         try p.allow(a, &.{}, "a bitfield");
-        const type_name = try p.name("the type's name");
+        const type_name = try p.declName(try p.name("the type's name"));
         const backing = try p.backingType("bitfield Flags : u32");
         if (backing.isSigned()) return p.fail(kw.start, "{s}: a bitfield's backing type is unsigned", .{type_name});
         return .{ .name = type_name, .at = @intCast(kw.start), .annotations = a.extra, .kind = .{ .bitfield = .{ .backing = backing, .members = try p.bitsBody(type_name) } } };
@@ -798,8 +1018,8 @@ const Parser = struct {
         while (p.tok.tag != .r_brace) {
             const ma = try p.anns();
             try p.allow(ma, &.{.bit}, "a bitfield member");
-            const type_tok = try p.expect(.ident, "a type: bool, an unsigned int or an enum");
-            const ty = p.text(type_tok);
+            const type_tok = p.tok;
+            const ty = try p.dottedName("a type: bool, an unsigned int or an enum");
             const n = try p.name("the member's name");
             var width: ?u16 = null;
             if (p.tok.tag == .colon) {
@@ -839,7 +1059,7 @@ const Parser = struct {
     fn errorDef(p: *P, a: Anns) Error!Schema.Type {
         const kw = p.advance();
         try p.allow(a, &.{}, "an error set");
-        const type_name = try p.name("the error set's name");
+        const type_name = try p.declName(try p.name("the error set's name"));
         _ = try p.expect(.l_brace, "'{{'");
         var errors: List(Schema.ErrorSet.Error) = .{};
         var next: u32 = 1;
@@ -862,12 +1082,12 @@ const Parser = struct {
     fn traitDef(p: *P, a: Anns) Error!Schema.Trait {
         const kw = p.advance();
         try p.allow(a, &.{}, "a trait");
-        const trait_name = try p.name("the trait's name");
+        const trait_name = try p.declName(try p.name("the trait's name"));
         var bases: List([]const u8) = .{};
         if (p.tok.tag == .colon) {
             _ = p.advance();
             while (true) {
-                try bases.append(p, try p.name("a base trait"));
+                try bases.append(p, try p.namedType("a base trait"));
                 if (p.tok.tag != .comma) break;
                 _ = p.advance();
             }
@@ -912,10 +1132,10 @@ const Parser = struct {
     fn implDef(p: *P, a: Anns) Error!Schema.Impl {
         const kw = p.advance();
         try p.allow(a, &convs, "an impl");
-        const trait = try p.name("the trait's name");
+        const trait = try p.namedType("the trait's name");
         if (!p.isKeyword("for")) return p.unexpected("'for' and a struct, like 'impl Damageable for Player'");
         _ = p.advance();
-        const for_type = try p.name("the struct's name");
+        const for_type = try p.namedType("the struct's name");
         var items: List(Schema.Item) = .{};
         if (p.tok.tag == .semicolon) {
             _ = p.advance();
@@ -967,12 +1187,235 @@ const Parser = struct {
         try p.allow(a, &.{}, "a constant");
         const at = p.tok.start;
         const ty = try p.typeRef();
-        const n = try p.name("the constant's name");
+        const n = try p.declName(try p.name("the constant's name"));
         _ = try p.expect(.equal, "'=' and its value");
         const value = try p.literal();
         _ = try p.expect(.semicolon, "';'");
         return .{ .name = n, .type = ty, .value = value, .at = @intCast(at), .annotations = a.extra };
     }
+
+    // Lookups
+
+    /// `types` sorted by name, for `Schema.findType`.
+    fn typeOrder(p: *P, types: []const Schema.Type) Error![]const u32 {
+        const order = try p.arena.alloc(u32, types.len);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        std.mem.sort(u32, order, types, struct {
+            fn lessThan(ts: []const Schema.Type, a: u32, b: u32) bool {
+                return std.mem.lessThan(u8, ts[a].name, ts[b].name);
+            }
+        }.lessThan);
+        return order;
+    }
+
+    // Resolving names
+
+    const Known = enum { type, trait, template };
+
+    /// Template parameters and what they stand for, in a generic's instance.
+    const Subst = struct {
+        params: []const []const u8 = &.{},
+        args: []const Ref = &.{},
+    };
+
+    /// Every name as the full name of what it means, where it was written, and a type for each
+    /// generic's use.
+    fn resolve(p: *P, s: *Schema) Error!void {
+        var r: Resolver = .{ .p = p };
+        try r.types.appendSlice(p.arena, s.types);
+        for (s.types) |t| try r.known.put(p.arena, t.name, .type);
+        for (s.traits) |t| {
+            const gop = try r.known.getOrPut(p.arena, t.name);
+            if (!gop.found_existing) gop.value_ptr.* = .trait;
+        }
+        for (p.templates.items, 0..) |t, i| {
+            const gop = try r.known.getOrPut(p.arena, t.type.name);
+            if (gop.found_existing) return p.fail(t.type.at, "there's already something named {s}", .{t.type.name});
+            gop.value_ptr.* = .template;
+            try r.template_index.put(p.arena, t.type.name, @intCast(i));
+        }
+        const declared = r.types.items.len;
+        for (0..declared) |i| {
+            const t = r.types.items[i];
+            const done = try r.typeDef(t, p.regionAt(t.at), .{});
+            r.types.items[i] = done;
+        }
+        const traits = try p.arena.dupe(Schema.Trait, s.traits);
+        for (traits) |*t| {
+            const region = p.regionAt(t.at);
+            const bases = try p.arena.alloc([]const u8, t.bases.len);
+            for (t.bases, bases) |b, *out| out.* = try r.name(b, region, .{}, t.at);
+            t.bases = bases;
+            const methods = try p.arena.dupe(Schema.Method, t.methods);
+            for (methods) |*m| m.signature = try r.signature(m.signature, region, .{}, m.at);
+            t.methods = methods;
+        }
+        const impls = try p.arena.dupe(Schema.Impl, s.impls);
+        for (impls) |*im| {
+            const region = p.regionAt(im.at);
+            im.trait = try r.name(im.trait, region, .{}, im.at);
+            im.@"for" = try r.name(im.@"for", region, .{}, im.at);
+        }
+        const functions = try p.arena.dupe(Schema.Method, s.functions);
+        for (functions) |*f| f.signature = try r.signature(f.signature, p.regionAt(f.at), .{}, f.at);
+        const statics = try p.arena.dupe(Schema.Static, s.statics);
+        for (statics) |*v| v.type = try r.ref(v.type, p.regionAt(v.at), .{}, v.at);
+        s.types = r.types.items;
+        s.traits = traits;
+        s.impls = impls;
+        s.functions = functions;
+        s.statics = statics;
+        for (s.types, 0..) |t, i| {
+            const gop = try p.index.getOrPut(p.arena, t.name);
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
+        }
+    }
+
+    const Resolver = struct {
+        p: *P,
+        types: std.ArrayList(Schema.Type) = .empty,
+        known: std.StringHashMapUnmanaged(Known) = .empty,
+        template_index: std.StringHashMapUnmanaged(u32) = .empty,
+        /// Instances being made inside each other.
+        depth: usize = 0,
+
+        const max_depth = 64;
+
+        fn box(r: *Resolver, value: Ref) Error!*const Ref {
+            return r.p.box(Ref, value);
+        }
+
+        fn typeDef(r: *Resolver, t: Schema.Type, region: Region, subst: Subst) Error!Schema.Type {
+            var out = t;
+            switch (t.kind) {
+                .@"struct", .@"union" => |st| {
+                    var done = st;
+                    if (st.base) |b| done.base = try r.name(b, region, subst, t.at);
+                    const fields = try r.p.arena.dupe(Schema.Field, st.fields);
+                    for (fields) |*f| f.type = try r.ref(f.type, region, subst, f.at);
+                    done.fields = fields;
+                    const methods = try r.p.arena.dupe(Schema.Method, st.methods);
+                    for (methods) |*m| m.signature = try r.signature(m.signature, region, subst, m.at);
+                    done.methods = methods;
+                    const statics = try r.p.arena.dupe(Schema.Static, st.statics);
+                    for (statics) |*v| v.type = try r.ref(v.type, region, subst, v.at);
+                    done.statics = statics;
+                    out.kind = if (t.kind == .@"union") .{ .@"union" = done } else .{ .@"struct" = done };
+                },
+                .bitfield => |b| {
+                    const members = try r.p.arena.dupe(Schema.Bits, b.members);
+                    for (members) |*m| switch (m.type) {
+                        .@"enum" => |n| m.type = .{ .@"enum" = try r.name(n, region, subst, m.at) },
+                        else => {},
+                    };
+                    out.kind = .{ .bitfield = .{ .backing = b.backing, .members = members } };
+                },
+                .func => |sig| out.kind = .{ .func = try r.signature(sig, region, subst, t.at) },
+                else => {},
+            }
+            return out;
+        }
+
+        fn signature(r: *Resolver, sig: Schema.Signature, region: Region, subst: Subst, at: usize) Error!Schema.Signature {
+            var out = sig;
+            const params = try r.p.arena.dupe(Schema.Param, sig.params);
+            for (params) |*q| q.type = try r.ref(q.type, region, subst, if (q.at != 0) q.at else at);
+            out.params = params;
+            out.ret = try r.ref(sig.ret, region, subst, at);
+            return out;
+        }
+
+        fn ref(r: *Resolver, x: Ref, region: Region, subst: Subst, at: usize) Error!Ref {
+            return switch (x) {
+                .prim => x,
+                .named => |n| {
+                    for (subst.params, subst.args) |param, value| if (std.mem.eql(u8, param, n)) return value;
+                    return .{ .named = try r.name(n, region, subst, at) };
+                },
+                .pointer => |c| .{ .pointer = try r.box(try r.ref(c.*, region, subst, at)) },
+                .slice => |c| .{ .slice = try r.box(try r.ref(c.*, region, subst, at)) },
+                .optional => |c| .{ .optional = try r.box(try r.ref(c.*, region, subst, at)) },
+                .array => |a| {
+                    var out = a;
+                    out.child = try r.box(try r.ref(a.child.*, region, subst, at));
+                    return .{ .array = out };
+                },
+                .result => |res| .{ .result = .{ .ok = try r.box(try r.ref(res.ok.*, region, subst, at)), .err = try r.name(res.err, region, subst, at) } },
+                .func => |sig| .{ .func = try r.p.box(Schema.Signature, try r.signature(sig.*, region, subst, at)) },
+            };
+        }
+
+        /// The full name of what `written` means where it was written, a generic's instance made
+        /// if it's new. Left as it is if it's nothing, for checking to say.
+        fn name(r: *Resolver, written: []const u8, region: Region, subst: Subst, at: usize) Error![]const u8 {
+            const p = r.p;
+            if (p.generic_uses.get(written)) |g| {
+                const full = try r.lookup(g.name, region, true, at) orelse {
+                    if (try r.lookup(g.name, region, false, at)) |found| return p.fail(at, "{s} isn't generic, so it doesn't take types", .{found});
+                    return p.fail(at, "there's no generic type named {s}", .{g.name});
+                };
+                const template = &p.templates.items[r.template_index.get(full).?];
+                if (g.args.len != template.params.len) return p.fail(at, "{s} takes {d} type{s}, not {d}", .{ full, template.params.len, if (template.params.len == 1) "" else "s", g.args.len });
+                const args = try p.arena.alloc(Ref, g.args.len);
+                var spelled: std.ArrayList(u8) = .empty;
+                try spelled.print(p.arena, "{s}<", .{full});
+                for (g.args, args, 0..) |written_arg, *out, i| {
+                    out.* = try r.ref(written_arg, region, subst, at);
+                    try spelled.print(p.arena, "{s}{f}", .{ if (i > 0) ", " else "", out.* });
+                }
+                try spelled.append(p.arena, '>');
+                if (r.known.getKey(spelled.items)) |key| return key;
+                const instance = try spelled.toOwnedSlice(p.arena);
+                try r.instantiate(template, args, instance, at);
+                return instance;
+            }
+            if (try r.lookup(written, region, false, at)) |found| return found;
+            if (try r.lookup(written, region, true, at)) |found| return p.fail(at, "{s} is generic, so it needs its types, like {s}<..>", .{ found, written });
+            return written;
+        }
+
+        /// A generic's type for `args`, named `instance`, at the end of `types`.
+        fn instantiate(r: *Resolver, template: *const Template, args: []const Ref, instance: []const u8, at: usize) Error!void {
+            const p = r.p;
+            if (r.depth >= max_depth) return p.fail(at, "{s} makes types from itself without end", .{template.type.name});
+            r.depth += 1;
+            defer r.depth -= 1;
+            try r.known.put(p.arena, instance, .type);
+            var t = template.type;
+            t.name = instance;
+            // Its place, kept while what it uses is made
+            const i = r.types.items.len;
+            try r.types.append(p.arena, t);
+            const done = try r.typeDef(t, p.regionAt(template.type.at), .{ .params = template.params, .args = args });
+            r.types.items[i] = done;
+        }
+
+        /// The namespace it's in and the ones around it first, then the top, then `use`s.
+        fn lookup(r: *Resolver, written: []const u8, region: Region, template: bool, at: usize) Error!?[]const u8 {
+            var buf: [1024]u8 = undefined;
+            var ns = region.ns;
+            while (true) {
+                const candidate = if (ns.len == 0) written else std.fmt.bufPrint(&buf, "{s}.{s}", .{ ns, written }) catch written;
+                if (r.match(candidate, template)) |key| return key;
+                if (ns.len == 0) break;
+                ns = ns[0 .. std.mem.lastIndexOfScalar(u8, ns, '.') orelse 0];
+            }
+            var found: ?[]const u8 = null;
+            for (region.uses) |u| {
+                const candidate = std.fmt.bufPrint(&buf, "{s}.{s}", .{ u, written }) catch continue;
+                const key = r.match(candidate, template) orelse continue;
+                if (found) |other| if (!std.mem.eql(u8, other, key)) return r.p.fail(at, "{s} could be {s} or {s}. Write the one you mean", .{ written, other, key });
+                found = key;
+            }
+            return found;
+        }
+
+        fn match(r: *Resolver, candidate: []const u8, template: bool) ?[]const u8 {
+            const entry = r.known.getEntry(candidate) orelse return null;
+            if ((entry.value_ptr.* == .template) != template) return null;
+            return entry.key_ptr.*;
+        }
+    };
 
     // Layout
 
@@ -988,7 +1431,8 @@ const Parser = struct {
         for (0..types.len) |i| try p.layoutType(view, types, i);
     }
 
-    fn typeIndex(types: []const Schema.Type, n: []const u8) ?usize {
+    fn typeIndex(p: *const P, types: []const Schema.Type, n: []const u8) ?usize {
+        if (p.index.count() > 0) return if (p.index.get(n)) |i| i else null;
         for (types, 0..) |t, i| if (std.mem.eql(u8, t.name, n)) return i;
         return null;
     }
@@ -1022,7 +1466,7 @@ const Parser = struct {
                 var end: usize = 0;
                 var max_align: usize = 1;
                 if (st.base) |b| {
-                    const bi = typeIndex(types, b) orelse return p.fail(t.at, "{s}'s base {s} isn't a type", .{ t.name, b });
+                    const bi = p.typeIndex(types, b) orelse return p.fail(t.at, "{s}'s base {s} isn't a type", .{ t.name, b });
                     if (types[bi].kind != .@"struct") return p.fail(t.at, "{s}'s base {s} isn't a struct", .{ t.name, b });
                     if (types[bi].alignment == visiting) return p.fail(t.at, "{s}'s bases go in a circle", .{t.name});
                     try p.layoutType(s, types, bi);
@@ -1056,7 +1500,7 @@ const Parser = struct {
                 // Like Zig's extern struct, each field only counts as far as its offset and the size allow
                 var a: usize = 1;
                 var chain: ?*const Schema.Type = t;
-                while (chain) |cur| : (chain = if (cur.kind == .@"struct") (if (cur.kind.@"struct".base) |b| &types[typeIndex(types, b).?] else null) else null) {
+                while (chain) |cur| : (chain = if (cur.kind == .@"struct") (if (cur.kind.@"struct".base) |b| &types[p.typeIndex(types, b).?] else null) else null) {
                     for (switch (cur.kind) {
                         .@"struct", .@"union" => |x| x.fields,
                         else => unreachable,
@@ -1082,7 +1526,7 @@ const Parser = struct {
     fn layoutRef(p: *P, s: Schema, types: []Schema.Type, r: Ref, at: usize) Error!void {
         switch (r) {
             .named => |n| {
-                if (typeIndex(types, n)) |i| return p.layoutType(s, types, i);
+                if (p.typeIndex(types, n)) |i| return p.layoutType(s, types, i);
                 if (s.findTrait(n) == null) return p.fail(at, "there's no type or trait named {s}", .{n});
             },
             .array => |a| try p.layoutRef(s, types, a.child.*, at),

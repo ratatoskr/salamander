@@ -13,15 +13,26 @@ fn parsed() !salamander_schema.Parsed {
     return salamander_schema.parse(testing.allocator, source, .{ .any_namespace = true }, null);
 }
 
+/// Like `Schema.writeFlatName`, which Zig has its names as.
 fn genName(comptime name: []const u8) []const u8 {
     comptime var out: []const u8 = "";
-    inline for (name) |c| out = out ++ &[_]u8{if (c == '.') '_' else c};
+    comptime var i = 0;
+    inline while (i < name.len) : (i += 1) out = out ++ switch (name[i]) {
+        '.', '<', ',' => "_",
+        '*' => "Ptr",
+        '>', ' ' => "",
+        else => &[_]u8{name[i]},
+    };
     return out;
 }
 
 /// `test.sal`'s types, since Zig can't list a file's declarations.
-const type_names = .{ "Vec3", "Entity", "Player", "Pair", "Bag", "Job", "Flags", "Stat", "Handle", "Hooks", "Visitor" };
-const trait_names = .{ "Walker", "Transform", "Named", "Damageable", "OnMove", "Freecam" };
+const type_names = .{
+    "Vec3",        "Entity",                  "Player",                      "Pair",             "Bag",                           "Job",
+    "Flags",       "Stat",                    "Handle",                      "Hooks",            "Visitor",                       "Scene.Node",
+    "Scene.Graph", "Scene.List<Scene.Node*>", "Scene.Map<u32, Scene.Node*>", "Scene.List<Vec3>", "Scene.Entry<u32, Scene.Node*>", "Scene.List<Scene.Entry<u32, Scene.Node*>>",
+};
+const trait_names = .{ "Walker", "Transform", "Named", "Damageable", "OnMove", "Freecam", "Scene.Picker" };
 
 fn check(s: salamander_schema.Schema) !void {
     @setEvalBranchQuota(100_000);
@@ -77,7 +88,7 @@ test "traits have the schema's hashes" {
     defer p.deinit();
     try testing.expectEqual(trait_names.len, p.schema.traits.len);
     inline for (trait_names) |name| {
-        const G = @field(gen, name);
+        const G = @field(gen, genName(name));
         try testing.expectEqual(p.schema.traitHash(p.schema.findTrait(name).?), G.salamander.hash);
         inline for (G.salamander.methods) |m| try testing.expect(m.sig != 0);
     }
@@ -255,6 +266,7 @@ const FakeGame = struct {
             .{ "Player", @intFromPtr(&table) },
             .{ "answer", @intFromPtr(&answer) },
             .{ "entry", @intFromPtr(&entry) },
+            .{ "Scene.Graph.sum", @intFromPtr(&entry) },
         };
         inline for (all) |e| if (std.mem.eql(u8, e[0], name)) return e[1];
         return error.NotFound;
@@ -278,6 +290,7 @@ test "generated Zig calls game code and reads its statics" {
     try testing.expectEqual(4, FakeGame.count);
     try testing.expectEqual(42, (try gen.answer()).*);
     try testing.expectEqual(7, gen.entry(3, 4));
+    try testing.expectEqual(7, gen.Scene.Graph.sum(3, 4));
     try testing.expectEqual(@intFromPtr(&FakeGame.table) + 2 * @sizeOf(usize), try gen.Player.addresses.attack());
     try gen.resolve();
 }
@@ -354,4 +367,15 @@ test "an array as long as a field" {
     const pairs = held.bag.pairsSlice();
     try testing.expectEqual(2, pairs.len);
     try testing.expectEqual(20, pairs[1].b);
+}
+
+test "namespaces and generics" {
+    try testing.expectEqual(gen.Scene_Node, gen.Scene.Node);
+    try testing.expectEqual(gen.Scene_Picker, gen.Scene.Picker);
+    try testing.expectEqual(gen.Scene_List_Scene_NodePtr, gen.Scene.List_Scene_NodePtr);
+    // Each instance has its own types in it
+    try testing.expectEqual(?*?*gen.Scene_Node, @FieldType(gen.Scene_List_Scene_NodePtr, "first"));
+    try testing.expectEqual(?*gen.Vec3, @FieldType(gen.Scene_List_Vec3, "first"));
+    try testing.expectEqual(gen.Scene_List_Scene_Entry_u32_Scene_NodePtr, @FieldType(gen.Scene_Map_u32_Scene_NodePtr, "entries"));
+    try testing.expectEqual(3 * @sizeOf(usize), @sizeOf(gen.Scene.List_Vec3));
 }

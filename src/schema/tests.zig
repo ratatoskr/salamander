@@ -416,3 +416,111 @@ test "types typed in, and lookups through bases" {
     try testing.expectEqual(4, Schema.findBits(s.findType("Flags").?, "level").?.bit);
     try testing.expectEqual(4 * @as(usize, s.pointer_size), s.sizeOf(t).?);
 }
+
+test "names resolve from where they're written, outward" {
+    var parsed = try parseTest(
+        \\file "a.sal";
+        \\struct Item { u32 top; }
+        \\namespace Game {
+        \\    struct Item { u32 game; }
+        \\    namespace Scene {
+        \\        struct Node { Item* item; Scene.Node* next; Game.Item* again; }
+        \\    }
+        \\    struct Holder { Scene.Node node; }
+        \\}
+        \\file "b.sal";
+        \\use Game.Scene;
+        \\struct Outside { Node node; Item item; }
+        \\file "c.sal";
+        \\namespace Tools;
+        \\[wraith.Sig("90")] i32 spawn(Game.Scene.Node* at);
+        \\[wraith.Sig("90")] static u32 count;
+    , .{ .namespaces = wraith });
+    defer parsed.deinit();
+    const s = parsed.schema;
+    const node = s.findType("Game.Scene.Node").?;
+    // The inner Item wins, and either spelling of itself is the same
+    try testing.expectEqualStrings("Game.Item", s.findField(node, "item").?.type.pointer.named);
+    try testing.expectEqualStrings("Game.Scene.Node", s.findField(node, "next").?.type.pointer.named);
+    try testing.expectEqualStrings("Game.Item", s.findField(node, "again").?.type.pointer.named);
+    try testing.expectEqualStrings("Game.Scene.Node", s.findField(s.findType("Game.Holder").?, "node").?.type.named);
+    // A `use` doesn't hide the top's
+    const outside = s.findType("Outside").?;
+    try testing.expectEqualStrings("Game.Scene.Node", s.findField(outside, "node").?.type.named);
+    try testing.expectEqualStrings("Item", s.findField(outside, "item").?.type.named);
+    // Functions and statics are in namespaces too, and found by their whole name
+    try testing.expect(!s.findFunction("Tools.spawn").?.hasThis());
+    try testing.expectEqualStrings("count", s.findStatic("Tools.count").?.static.name[6..]);
+}
+
+test "generics are made for each set of types they're used with" {
+    var parsed = try parseTest(
+        \\namespace Std {
+        \\    struct Vector<T> { T* first; T* last; T* end; }
+        \\    struct Pair<A, B> { A a; B b; }
+        \\    struct Map<K, V> { Vector<Pair<K, V>> items; }
+        \\}
+        \\struct Item { u8 x; }
+        \\struct Bag : Std.Vector<Item> {
+        \\    Std.Map<u32, Item*> byId;
+        \\    Std.Pair<u8, u64> odd;
+        \\    Std.Vector<Item> same;
+        \\}
+    , .{ .pointer_size = 8 });
+    defer parsed.deinit();
+    const s = parsed.schema;
+    const bag = s.findType("Bag").?;
+    try testing.expectEqualStrings("Std.Vector<Item>", bag.kind.@"struct".base.?);
+    try testing.expectEqualStrings("Std.Vector<Item>", s.findField(bag, "same").?.type.named);
+    try testing.expectEqualStrings("Item", s.findField(s.findType("Std.Vector<Item>").?, "first").?.type.pointer.named);
+    // Laid out like any struct, each with its own types
+    try testing.expectEqual(16, s.findType("Std.Pair<u8, u64>").?.size);
+    try testing.expectEqual(8, offsetOf(s, "Std.Pair<u8, u64>", "b"));
+    const items = s.findField(s.findType("Std.Map<u32, Item*>").?, "items").?;
+    try testing.expectEqualStrings("Std.Vector<Std.Pair<u32, Item*>>", items.type.named);
+    try testing.expectEqualStrings("Item", s.findField(s.findType("Std.Pair<u32, Item*>").?, "b").?.type.pointer.named);
+    // One of each, and the generics themselves aren't types
+    var vectors: usize = 0;
+    for (s.types) |t| vectors += @intFromBool(std.mem.startsWith(u8, t.name, "Std.Vector<"));
+    try testing.expectEqual(2, vectors);
+    try testing.expectEqual(null, s.findType("Std.Vector"));
+}
+
+test "namespace and generic mistakes say what's wrong" {
+    const cases = [_][2][]const u8{
+        .{ "struct List<T> { T* first; } struct A { List<u8, u16> l; }", "List takes 1 type, not 2" },
+        .{ "struct List<T> { T* first; } struct A { List l; }", "List is generic, so it needs its types" },
+        .{ "struct B { u8 x; } struct A { B<u8> b; }", "B isn't generic" },
+        .{ "struct A { Nope<u8> n; }", "there's no generic type named Nope" },
+        .{ "struct Grow<T> { Grow<T*>* next; } struct A { Grow<u8> g; }", "makes types from itself without end" },
+        .{ "struct List<T> { u8 x; } struct List { u8 y; }", "there's already something named List" },
+        .{ "namespace A { struct X { u8 a; }", "namespace A needs a '}'" },
+        .{ "namespace A { namespace B; }", "is for the whole file" },
+        .{ "namespace A { struct X {} } namespace B { struct X {} } use A; struct Y { X x; }", "`use` goes at the top" },
+        .{ "file \"a.sal\";\nnamespace A { struct X { u8 a; } }\nnamespace B { struct X { u8 b; } }\nfile \"b.sal\";\nuse A;\nuse B;\nstruct Y { X x; }", "X could be A.X or B.X" },
+    };
+    for (cases) |case| {
+        var diag: Schema.Diagnostic = .{};
+        try testing.expectError(error.InvalidSchema, schema.parse(testing.allocator, case[0], .{}, &diag));
+        if (std.mem.indexOf(u8, diag.message(), case[1]) == null) {
+            std.debug.print("expected '{s}' in '{s}'\n", .{ case[1], diag.message() });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "signatures name namespaced code and generics" {
+    const source =
+        \\namespace Game {
+        \\    struct Box<T> { T value; }
+        \\    struct Player { [Sig("90")] f32 heal(f32 amount); }
+        \\}
+    ;
+    var buf: [128]u8 = undefined;
+    var named = try schema.parseSignature(testing.allocator, source, "Game.Player.heal", .{ .namespaces = wraith, .uses = &.{"wraith"} }, null);
+    defer named.deinit();
+    try testing.expectEqualStrings("(Game.Player* self, f32 amount) f32", try std.fmt.bufPrint(&buf, "{f}", .{named.schema.findType(schema.signature_name).?.kind.func}));
+    var written = try schema.parseSignature(testing.allocator, source, "fn void (Game.Box<u16>* b)", .{ .namespaces = wraith, .uses = &.{"wraith"} }, null);
+    defer written.deinit();
+    try testing.expectEqual(2, written.schema.findType("Game.Box<u16>").?.size);
+}
