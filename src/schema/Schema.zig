@@ -30,6 +30,14 @@ pub fn fileOf(source: []const u8, at: usize) []const u8 {
     return Diagnostic.fileAt(source, at).name;
 }
 
+/// The text of the bundled file `at` is in, without its marker. All of it outside a bundle.
+pub fn fileText(source: []const u8, at: usize) []const u8 {
+    const f = Diagnostic.fileAt(source, at);
+    if (f.name.len == 0) return source;
+    const next = std.mem.indexOfPos(u8, source, f.start, "\n" ++ bundle_marker) orelse return source[f.start..];
+    return source[f.start .. next + 1];
+}
+
 pub const Diagnostic = struct {
     len: u32 = 0,
     buf: [256]u8 = undefined,
