@@ -23,7 +23,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "salamander_runtime", .module = runtime },
     });
     _ = ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }});
-    _ = ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }});
+    // C#, with the runtime's own core.sal so tools can write its C# too
+    ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
     // Typings for scripts' editors
     _ = ctx.addModule("types", &.{.{ .name = "salamander_schema", .module = schema }});
     // The engines, so everything using salamander shares one of each
@@ -96,7 +97,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "salamander_schema", .module = host_schema },
                 .{ .name = "salamander_zig", .module = host_zig },
                 .{ .name = "salamander_c", .module = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
-                .{ .name = "salamander_cs", .module = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
+                .{ .name = "salamander_cs", .module = blk: {
+                    const cs = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }});
+                    cs.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
+                    break :blk cs;
+                } },
             },
         }),
     });

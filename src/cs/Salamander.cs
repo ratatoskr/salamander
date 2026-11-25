@@ -379,6 +379,14 @@ public static unsafe class Runtime
         if (Owner != null) host.releasable(Owner, Raw.Release.Unowned(new ReleaseHook()));
     }
 
+    /// <summary>Like Init, with an owner the host made already, like a plugin's from its loader.</summary>
+    public static void Init(Raw.Host host, Owner* owner)
+    {
+        Runtime.host = host;
+        Owner = owner;
+        if (owner != null) host.releasable(owner, Raw.Release.Unowned(new ReleaseHook()));
+    }
+
     sealed class ReleaseHook : Raw.IRelease
     {
         public void call(nuint data) => Abi.Free(data);
@@ -408,6 +416,40 @@ public static unsafe class Runtime
     }
 }
 
+/// <summary>A trait's class, so generic code can wrap an object as one, like a plugin's services.</summary>
+public interface ITrait<T> where T : class, ITrait<T>
+{
+    /// <summary>Its name in its schema, which services and the host's registry go by.</summary>
+    static abstract string TraitName { get; }
+
+    /// <summary>Null without a table. owned when the object's the caller's to let go of.</summary>
+    static abstract T? FromObject(AnyObject o, bool owned = false);
+}
+/// <summary>
+/// Finds code a schema declares in what already exists, like a game's functions by signature, for the
+/// generated wrappers. Whatever loads this sets Locator, which gives an address or throws saying why.
+/// What it finds is kept.
+/// </summary>
+public static class Declared
+{
+    public static Func<string, nuint>? Locator;
+
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, nuint> found = new();
+
+    /// <summary>Where name is, like Player.heal or spawn. Throws if it isn't there.</summary>
+    public static nuint Address(string name)
+    {
+        if (found.TryGetValue(name, out var at)) return at;
+        var locate = Locator ?? throw new InvalidOperationException($"{name}: nothing here finds the code schemas declare");
+        at = locate(name);
+        if (at == 0) throw new InvalidOperationException($"{name} wasn't found");
+        found[name] = at;
+        return at;
+    }
+
+    /// <summary>Slot slot of the vtable at the start of obj.</summary>
+    public static unsafe nuint Virtual(void* obj, int slot) => (*(nuint**)obj)[slot];
+}
 /// <summary>Turns promises into tasks and back.</summary>
 public static unsafe class Promises
 {

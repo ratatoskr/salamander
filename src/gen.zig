@@ -40,6 +40,7 @@ pub fn main(init: std.process.Init) !void {
     var uses: std.ArrayList([]const u8) = .empty;
     var with: std.ArrayList([2][]const u8) = .empty;
     var aliases: std.ArrayList(salamander_zig.Alias) = .empty;
+    var cs_aliases: std.ArrayList(salamander_cs.Alias) = .empty;
     var instances: std.ArrayList(salamander_schema.InstanceTag) = .empty;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--pointer-size")) {
@@ -71,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
             const spec = args.next() orelse return usage();
             const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return usage();
             try aliases.append(arena, .{ .prefix = spec[0..eq], .import = spec[eq + 1 ..] });
+            try cs_aliases.append(arena, .{ .prefix = spec[0..eq], .namespace = spec[eq + 1 ..] });
         } else return usage();
     }
 
@@ -91,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     const written = if (is_c)
         salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core }, &diag)
     else if (is_cs)
-        salamander_cs.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .class = class, .core = core }, &diag)
+        salamander_cs.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .class = class, .core = core, .source = source, .aliases = cs_aliases.items }, &diag)
     else
         salamander_zig.write(arena, parsed.schema, &out.writer, .{ .label = label, .runtime = runtime, .source = source, .aliases = aliases.items }, &diag);
     written catch |err| switch (err) {

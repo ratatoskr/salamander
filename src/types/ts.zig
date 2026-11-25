@@ -133,6 +133,8 @@ pub fn builtins(w: *Writer) Error!void {
         \\  export function edit<T extends object>(view: T, f: (copy: T) => void | Promise<void>): void;
         \\  /** A `.sal` written while running, in place of what was loaded as `name` before. Gives what it declares, like the `schema` module. */
         \\  export function load(name: string, text: string): any;
+        \\  /** What a struct can be given as: any of its fields, and the same for the structs in them. */
+        \\  export type Given<T> = T extends (...args: any[]) => any ? T : T extends Uint8Array ? T : T extends ReadonlyArray<infer E> ? Array<Given<E>> : T extends object ? { [K in keyof T]?: Given<T[K]> } : T;
         \\}
         \\
         \\declare const salamander: typeof import("salamander");
@@ -438,7 +440,7 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
                 .@"opaque" => try w.writeAll("number"),
                 else => {
                     if (use == .in and (t.kind == .@"struct" or t.kind == .@"union")) {
-                        try w.writeAll("Partial<");
+                        try w.writeAll("import(\"salamander\").Given<");
                         try types.writeTypeName(w, n);
                         return w.writeByte('>');
                     }
@@ -555,7 +557,7 @@ test "a module's traits, types and exports, with docs" {
         "    maybe(): number | null;",
         "  export type Tick = (n: number) => void;",
         "     * Says hi\n     * @throws `Shy`\n",
-        "    greet(mode: Mode | ModeName, count: { value: number }, in_: Partial<Greeting>): Greeting;",
+        "    greet(mode: Mode | ModeName, count: { value: number }, in_: import(\"salamander\").Given<Greeting>): Greeting;",
         "    later(tick: Tick): Promise<bigint>;",
         "  export const greeter: Greeter;",
         "declare const greeter: import(\"app\").Greeter;",

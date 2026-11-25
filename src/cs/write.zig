@@ -30,6 +30,16 @@ pub const Options = struct {
     class: []const u8 = "Schema",
     /// Writing the runtime's own `core.sal`, into the `Salamander` namespace with `Salamander.cs`.
     core: bool = false,
+    /// The bundle's text, so `aliases` can tell which file each thing came from.
+    source: []const u8 = "",
+    aliases: []const Alias = &.{},
+};
+
+/// Everything declared in bundled files whose names start with `prefix`, like `wraith/`, is used from
+/// the C# namespace `namespace` instead, where it's already been written, like the Zig generator's.
+pub const Alias = struct {
+    prefix: []const u8,
+    namespace: []const u8,
 };
 
 pub fn write(gpa: std.mem.Allocator, s: Schema, w: *std.Io.Writer, options: Options, diagnostic: ?*Schema.Diagnostic) Error!void {
@@ -63,7 +73,13 @@ const helper_locals = [_][]const u8{ "self", "t", "r", "e", "data", "table", "f"
 const trait_members = [_][]const u8{ "data", "table", "Info", "AsObject", "FromObject", "Of", "Unowned", "Free", "Implemented" };
 
 /// What every trait's class has.
-const wrapper_members = [_][]const u8{ "Raw", "FromRaw", "From", "Dispose", "Provided", "Provide", "Adapter" };
+const wrapper_members = [_][]const u8{ "Raw", "FromRaw", "From", "Dispose", "TraitName", "FromObject", "Provided", "Provide", "Adapter" };
+
+/// The last part of a name, like `spawn` for `Game.spawn`.
+fn leafOf(n: []const u8) []const u8 {
+    const end = Schema.namespaceEnd(n) orelse return n;
+    return n[end + 1 ..];
+}
 
 fn contains(list: []const []const u8, n: []const u8) bool {
     for (list) |o| if (std.mem.eql(u8, o, n)) return true;
@@ -76,6 +92,8 @@ const Extra = struct {
     ref: Ref,
     /// A function value's, so the same signature in two places is one type.
     hash: u64 = 0,
+    /// A named function type an alias has, which is used from there.
+    base: bool = false,
 };
 
 /// Where a slice is, since parameters can take spans but fields and returns are arrays.
@@ -165,11 +183,37 @@ const Gen = struct {
         return if (g.o.namespace.len > 0) g.fmt("{s}.", .{g.o.namespace}) catch "" else "";
     }
 
+    /// The namespace what's declared at `at` is used from, if its file's aliased.
+    fn aliasOf(g: *Gen, at: Schema.Pos) ?[]const u8 {
+        if (g.o.aliases.len == 0) return null;
+        const file_name = Schema.fileOf(g.o.source, at);
+        for (g.o.aliases) |a| if (std.mem.startsWith(u8, file_name, a.prefix)) return a.namespace;
+        return null;
+    }
+
+    fn aliasOfName(g: *Gen, n: []const u8) ?[]const u8 {
+        if (g.o.aliases.len == 0) return null;
+        if (g.s.findType(n)) |t| return g.aliasOf(t.at);
+        if (g.s.findTrait(n)) |t| return g.aliasOf(t.at);
+        return null;
+    }
+
+    /// Whether `n` is aliased, so it's used from there.
+    fn isBase(g: *Gen, n: []const u8) bool {
+        return g.aliasOfName(n) != null;
+    }
+
+    /// The namespace `n` is in, with a dot, its alias's if it has one.
+    fn nsDotOf(g: *Gen, n: []const u8) []const u8 {
+        const ns = g.aliasOfName(n) orelse return g.nsDot();
+        return if (ns.len > 0) g.fmt("{s}.", .{ns}) catch "" else "";
+    }
+
     /// Where a plain type is, like `global::Game.Scene.Node`, with `prefix` before its last part.
     fn plainRefWith(g: *Gen, n: []const u8, prefix: []const u8) Error![]const u8 {
         const end = Schema.namespaceEnd(n);
         const path = if (end) |e| try g.fmt("{s}.", .{n[0..e]}) else "";
-        return g.fmt("global::{s}{s}{s}{s}", .{ g.nsDot(), path, prefix, try g.leaf(n) });
+        return g.fmt("global::{s}{s}{s}{s}", .{ g.nsDotOf(n), path, prefix, try g.leaf(n) });
     }
 
     fn plainRef(g: *Gen, n: []const u8) Error![]const u8 {
@@ -185,8 +229,18 @@ const Gen = struct {
         return g.fmt("{s}.{s}", .{ try g.rawNs(), try g.ident(flat) });
     }
 
+    /// A named type's raw one, in the base's `Raw` if the base has it.
+    fn rawRefOf(g: *Gen, n: []const u8) Error![]const u8 {
+        return g.fmt("global::{s}Raw.{s}", .{ g.nsDotOf(n), try g.ident(try g.bare(n)) });
+    }
+
     fn convRef(g: *Gen) Error![]const u8 {
         return g.fmt("global::{s}SalamanderConvert", .{g.nsDot()});
+    }
+
+    /// The converters for a named function type, the base's if it has it.
+    fn convRefOf(g: *Gen, n: []const u8) Error![]const u8 {
+        return g.fmt("global::{s}SalamanderConvert", .{g.nsDotOf(n)});
     }
 
     // What needs converting
@@ -344,7 +398,7 @@ const Gen = struct {
             .prim => |p| prim(p),
             .named => |n| switch (g.kindOf(n)) {
                 .shared, .none => g.plainRef(n),
-                else => g.rawRef(try g.bare(n)),
+                else => g.rawRefOf(n),
             },
             .pointer => |c| g.fmt("{s}*", .{try g.ty(c.*)}),
             .array => |a| if (a.count != null or a.len == 0) g.fmt("{s}*", .{try g.ty(a.child.*)}) else g.rawRef(try g.mangle(r)),
@@ -489,7 +543,7 @@ const Gen = struct {
             .named => |n| switch (g.kindOf(n)) {
                 .twin => g.fmt("(({s})?.ToRaw(__a, {s}) ?? default)", .{ e, keep }),
                 .trait => g.fmt("(({s})?.Raw ?? default)", .{e}),
-                .func => g.fmt("{s}.Lower_{s}({s}, __a, {s})", .{ try g.convRef(), g.namedFn(n).name, e, keep }),
+                .func => g.fmt("{s}.Lower_{s}({s}, __a, {s})", .{ try g.convRefOf(n), g.namedFn(n).name, e, keep }),
                 else => e,
             },
             .array, .slice => g.fmt("{s}.Lower_{s}({s}, __a, {s})", .{ try g.convRef(), try g.mangle(r), e, keep }),
@@ -518,7 +572,7 @@ const Gen = struct {
             .named => |n| switch (g.kindOf(n)) {
                 .twin => g.fmt("{s}.FromRaw({s})", .{ try g.plainRef(n), e }),
                 .trait => g.fmt("{s}.FromRaw({s}, {s})", .{ try g.plainRef(n), e, owned }),
-                .func => g.fmt("{s}.Lift_{s}({s})", .{ try g.convRef(), g.namedFn(n).name, e }),
+                .func => g.fmt("{s}.Lift_{s}({s})", .{ try g.convRefOf(n), g.namedFn(n).name, e }),
                 else => e,
             },
             .array, .slice => g.fmt("{s}.Lift_{s}({s})", .{ try g.convRef(), try g.mangle(r), e }),
@@ -547,18 +601,31 @@ const Gen = struct {
 
         // Named function types first, so their signatures keep their own names
         for (s.types) |t| if (t.kind == .func) {
-            for (t.kind.func.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ t.name, p.name }));
-            try g.collect(t.kind.func.ret, t.name);
-            try g.fns.append(g.a, .{ .name = try g.bare(t.name), .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func) });
+            const base = g.isBase(t.name);
+            if (!base) {
+                for (t.kind.func.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ t.name, p.name }));
+                try g.collect(t.kind.func.ret, t.name);
+            }
+            try g.fns.append(g.a, .{ .name = try g.bare(t.name), .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func), .base = base });
         };
         for (s.types) |t| {
+            if (g.isBase(t.name)) continue;
             try g.claim(try g.bare(t.name));
             switch (t.kind) {
                 .@"struct", .@"union" => |st| for (st.fields) |f| try g.collect(f.type, try g.fmt("{s}_{s}", .{ t.name, f.name })),
                 else => {},
             }
         }
+        // What existing code declares takes `this` first, and handlers for hooking it are function values
+        if (!g.o.core) {
+            for (s.types) |*t| {
+                if (g.isBase(t.name) or t.kind != .@"struct") continue;
+                for (t.kind.@"struct".methods) |*m| try g.collectDeclared(.{ .in = t, .owner = t, .method = m }, try g.fmt("{s}_{s}", .{ t.name, m.name }));
+            }
+            for (s.functions) |*m| if (g.aliasOf(m.at) == null) try g.collectDeclared(.{ .method = m }, m.name);
+        }
         for (s.traits) |*t| {
+            if (g.isBase(t.name)) continue;
             const n = try g.bare(t.name);
             try g.claim(n);
             try g.claim(try g.fmt("{s}_Table", .{n}));
@@ -572,6 +639,7 @@ const Gen = struct {
         try g.claim("Raw");
         try g.claim("SalamanderConvert");
         for (g.fns.items) |f| {
+            if (f.base) continue;
             if (f.ref == .func) {
                 try g.claim(f.name);
                 if (!g.o.core) try g.claim(try g.pascal(f.name));
@@ -586,17 +654,22 @@ const Gen = struct {
         // Plain C#, with what both layers share
         var close = try g.open("");
         try g.print("\npublic static unsafe partial class {s}\n{{\n    /// <summary>What these types are laid out for.</summary>\n    public const int PointerSize = {d};\n", .{ try g.ident(g.o.class), s.pointer_size });
-        for (s.constants) |k| try g.constant(k);
+        for (s.constants) |k| if (g.aliasOf(k.at) == null) try g.constant(k);
         try g.print("}}\n", .{});
         if (!g.o.core) for (g.fns.items) |f| if (f.ref == .func) try g.delegateDef(try g.pascal(f.name), f.ref.func.*);
         try g.converters();
         try g.print("{s}", .{close});
+        if (!g.o.core) try g.declaredTop();
 
         for (s.types) |*t| {
             if (t.kind == .func and g.o.core) continue;
+            if (g.isBase(t.name)) continue;
             close = try g.open(t.name);
             switch (t.kind) {
-                .@"struct" => if (g.kindOf(t.name) == .twin) try g.twinDef(t) else try g.structDef(t, false),
+                .@"struct" => if (g.kindOf(t.name) == .twin) try g.twinDef(t) else {
+                    try g.structDef(t, false);
+                    if (!g.o.core) try g.declaredOf(t);
+                },
                 .@"union" => try g.structDef(t, false),
                 .@"enum" => |e| try g.enumDef(t, e),
                 .bitfield => |b| try g.bitfieldDef(t, b),
@@ -608,6 +681,7 @@ const Gen = struct {
             try g.print("{s}", .{close});
         }
         for (s.traits) |*t| {
+            if (g.isBase(t.name)) continue;
             close = try g.open(t.name);
             try g.wrapper(t);
             try g.print("{s}", .{close});
@@ -615,11 +689,12 @@ const Gen = struct {
 
         // What crosses
         try g.print("\nnamespace {s}\n{{\n", .{(try g.rawNs())["global::".len..]});
-        for (s.types) |*t| if (g.kindOf(t.name) == .twin) try g.structDef(t, true);
+        for (s.types) |*t| if (!g.isBase(t.name) and g.kindOf(t.name) == .twin) try g.structDef(t, true);
         for (g.slices.items) |x| try g.print("\npublic unsafe struct {s}\n{{\n    public {s}* ptr;\n    public nuint len;\n}}\n", .{ try g.ident(x.name), try g.ty(x.ref) });
         for (g.opts.items) |x| try g.print("\npublic unsafe struct {s}\n{{\n    public {s} value;\n    public {s}Bool some;\n}}\n", .{ try g.ident(x.name), try g.ty(x.ref), sal });
         for (g.arrays.items) |x| try g.arrayDef(x);
         for (g.fns.items) |f| {
+            if (f.base) continue;
             const sig = g.sigOf(f);
             const m: Schema.Method = .{ .name = "call", .signature = sig };
             const ms = [_]*const Schema.Method{&m};
@@ -627,6 +702,7 @@ const Gen = struct {
             try g.object(f.name, "fn", 0, &ms, &.{Schema.signatureHash(sig)}, &.{});
         }
         for (s.traits) |*t| {
+            if (g.isBase(t.name)) continue;
             var buf: [plan.max_methods]*const Schema.Method = undefined;
             const ms = plan.methods(g.s, t, &buf);
             const sigs = try g.a.alloc(u64, ms.len);
@@ -635,6 +711,122 @@ const Gen = struct {
             try g.object(try g.bare(t.name), t.name, g.s.traitHash(t), ms, sigs, t.bases);
         }
         try g.print("}}\n", .{});
+    }
+
+    // What existing code declares, found through `Salamander.Declared`
+
+    fn collectDeclared(g: *Gen, f: Schema.Function, site: []const u8) Error!void {
+        const sig = try g.a.create(Schema.Signature);
+        sig.* = try Schema.callSignature(f, g.a);
+        try g.collect(.{ .func = sig }, site);
+    }
+
+    /// The members a struct's declared methods and statics give it, in a partial of its own.
+    fn declaredOf(g: *Gen, t: *const Schema.Type) Error!void {
+        const st = t.kind.@"struct";
+        if (st.methods.len + st.statics.len == 0) return;
+        const n = try g.leaf(t.name);
+        try g.print("\npublic unsafe partial struct {s}\n{{\n", .{n});
+        try g.declaredAddresses(t.name, st.methods, st.statics);
+        for (st.statics) |*v| try g.declaredStatic(n, t.name, v);
+        for (st.methods) |*m| try g.declaredMethod(n, .{ .in = t, .owner = t, .method = m });
+        try g.print("}}\n", .{});
+    }
+
+    /// Top-level functions and statics, in the class with the schema's constants.
+    fn declaredTop(g: *Gen) Error!void {
+        const s = g.s;
+        for (s.functions) |*m| {
+            if (g.aliasOf(m.at) != null) continue;
+            const close = try g.open(m.name);
+            try g.print("\npublic static unsafe partial class {s}\n{{\n", .{try g.ident(g.o.class)});
+            try g.declaredAddresses("", &.{m.*}, &.{});
+            try g.declaredMethod(try g.ident(g.o.class), .{ .method = m });
+            try g.print("}}\n{s}", .{close});
+        }
+        for (s.statics) |*v| {
+            if (g.aliasOf(v.at) != null) continue;
+            const close = try g.open(v.name);
+            try g.print("\npublic static unsafe partial class {s}\n{{\n", .{try g.ident(g.o.class)});
+            try g.declaredAddresses("", &.{}, &.{v.*});
+            try g.declaredStatic(try g.ident(g.o.class), "", v);
+            try g.print("}}\n{s}", .{close});
+        }
+    }
+
+    /// `Player.heal`, or `spawn` at the top.
+    fn declaredName(g: *Gen, owner: []const u8, name: []const u8) Error![]const u8 {
+        return if (owner.len == 0) name else g.fmt("{s}.{s}", .{ owner, name });
+    }
+
+    fn declaredAddresses(g: *Gen, owner: []const u8, methods: []const Schema.Method, statics: []const Schema.Static) Error!void {
+        try g.print("    /// <summary>Where each is, found by name the first time it's asked for.</summary>\n    public static partial class Addresses\n    {{\n", .{});
+        for (methods) |m| try g.print("        public static nuint {s}() => {s}Declared.Address(\"{s}\");\n", .{ try g.pascal(leafOf(m.name)), sal, try g.declaredName(owner, m.name) });
+        for (statics) |v| try g.print("        public static nuint {s}() => {s}Declared.Address(\"{s}\");\n", .{ try g.pascal(leafOf(v.name)), sal, try g.declaredName(owner, v.name) });
+        try g.print("    }}\n", .{});
+    }
+
+    /// A pointer static gives what's stored there, and an OrFail that throws while it's null. Anything
+    /// else gives a pointer to it.
+    fn declaredStatic(g: *Gen, n: []const u8, owner: []const u8, v: *const Schema.Static) Error!void {
+        const full = try g.declaredName(owner, v.name);
+        const vn = try g.member(n, try g.pascal(leafOf(v.name)));
+        const t = try g.ty(v.type);
+        if (v.type == .pointer or (v.type == .optional and v.type.optional.* == .pointer)) {
+            try g.print("\n    /// <summary>`{s}`, what's stored there.</summary>\n    public static {s} {s}() => *({s}*){s}Declared.Address(\"{s}\");\n", .{ full, t, vn, t, sal, full });
+            try g.print("\n    /// <summary>`{s}`, throwing while it's null, like before the game's made it.</summary>\n    public static {s} {s}OrFail() => {s}() is var __p && __p != null ? __p : throw new {s}InvalidOperationException(\"{s} is null\");\n", .{ full, t, vn, vn, sys, full });
+            return;
+        }
+        try g.print("\n    /// <summary>`{s}`, the global itself.</summary>\n    public static {s}* {s}() => ({s}*){s}Declared.Address(\"{s}\");\n", .{ full, t, vn, t, sal, full });
+    }
+
+    /// Its function pointer type, a call converting plain C# both ways, and a hook handler of its type.
+    fn declaredMethod(g: *Gen, n: []const u8, f: Schema.Function) Error!void {
+        const m = f.method;
+        const owner = if (f.in) |t| t.name else "";
+        const full = try g.declaredName(owner, m.name);
+        const sig = try Schema.callSignature(f, g.a);
+        const pn = try g.member(n, try g.pascal(leafOf(m.name)));
+        // The type it's called as
+        var fp: std.Io.Writer.Allocating = .init(g.a);
+        try fp.writer.print("delegate* unmanaged[{s}]<", .{conv(sig.conv)});
+        for (sig.params) |p| try fp.writer.print("{s}, ", .{try g.ty(p.type)});
+        try fp.writer.print("{s}>", .{try g.ty(sig.ret)});
+        const fn_type = fp.written();
+        try g.print("\n    /// <summary>`{s}` as the function at `at`, like a hook's original.</summary>\n    public static {s} {s}At(nuint at) => ({s})at;\n", .{ full, fn_type, pn, fn_type });
+
+        // The call, with `this` from the struct it's called on
+        const has_this = f.hasThis();
+        const call_m: Schema.Method = .{ .name = m.name, .signature = m.signature };
+        const ps = try g.plainSig(&call_m, m.name, null);
+        const where = if (m.virtual) |slot|
+            try g.fmt("{s}Declared.Virtual(__self, {d})", .{ sal, slot })
+        else
+            try g.fmt("{s}Declared.Address(\"{s}\")", .{ sal, full });
+        try g.print("\n    /// <summary>`{s}`{s}.</summary>\n    public {s}{s} {s}({s})\n    {{\n", .{ full, if (m.virtual != null) ", through the vtable" else "", if (has_this) "" else "static ", ps.ret, pn, ps.decl });
+        if (has_this) try g.print("        var __self = ({s}*){s}Runtime.CompilerServices.Unsafe.AsPointer(ref this);\n", .{ n, sys });
+        var args: std.Io.Writer.Allocating = .init(g.a);
+        if (has_this) try args.writer.writeAll("__self");
+        for (m.signature.params, 0..) |p, i| {
+            if (has_this or i > 0) try args.writer.writeAll(", ");
+            try args.writer.writeAll(try g.lower(p.type, try g.ident(p.name), if (p.keep) "true" else "false"));
+        }
+        if (std.mem.indexOf(u8, args.written(), "__a") != null) try g.print("        using var __s = {s}Scratch.Enter();\n        var __a = __s.Allocator;\n", .{sal});
+        const call = try g.fmt("{s}At({s})({s})", .{ pn, where, args.written() });
+        if (isVoid(m.signature.ret)) try g.print("        {s};\n    }}\n", .{call}) else try g.print("        var __r = {s};\n        return {s};\n    }}\n", .{ call, try g.lift(m.signature.ret, "__r", "true") });
+
+        // What hooks.named takes for it
+        const fv = try g.fnOf(sig);
+        try g.print(
+            \\
+            \\    /// <summary>A handler for hooking `{s}`, for hooks.Named. It's held till the hook's done with it.</summary>
+            \\    public static {s}AnyObject {s}Handler({s} handler)
+            \\    {{
+            \\        using var __s = {s}Scratch.Enter();
+            \\        return {s}.Lower_{s}(handler, __s.Allocator, true).AsObject();
+            \\    }}
+            \\
+        , .{ full, sal, pn, try g.delegateRef(fv), sal, try g.convRef(), fv.name });
     }
 
     fn sigOf(g: *Gen, f: Extra) Schema.Signature {
@@ -917,7 +1109,8 @@ const Gen = struct {
         try g.print("\npublic unsafe interface I{s}", .{n});
         var first = true;
         for (bases) |b| if (g.s.findTrait(b) != null) {
-            try g.print("{s}I{s}", .{ if (first) " : " else ", ", try g.bare(b) });
+            const base_i = if (g.isBase(b)) try g.fmt("global::{s}Raw.I{s}", .{ g.nsDotOf(b), try g.bare(b) }) else try g.fmt("I{s}", .{try g.bare(b)});
+            try g.print("{s}{s}", .{ if (first) " : " else ", ", base_i });
             first = false;
         };
         try g.print("\n{{\n", .{});
@@ -1129,7 +1322,7 @@ const Gen = struct {
         for (ms) |m| {
             const pn = (try g.plainSig(m, m.name, null)).name;
             // The core's classes don't have Provided and Provide
-            const taken = if (g.o.core) contains(wrapper_members[0..4], pn) or std.mem.eql(u8, pn, "Adapter") else contains(&wrapper_members, pn);
+            const taken = if (g.o.core) contains(wrapper_members[0..6], pn) or std.mem.eql(u8, pn, "Adapter") else contains(&wrapper_members, pn);
             if (taken or std.mem.eql(u8, pn, n)) {
                 g.diag.print("{s}.{s}: C#'s {s} class has its own member called {s}", .{ t.name, m.name, n, pn });
                 return error.NameClash;
@@ -1137,7 +1330,7 @@ const Gen = struct {
         }
         try g.print(
             \\
-            \\public sealed unsafe partial class {s} : {s}IDisposable
+            \\public sealed unsafe partial class {s} : {s}IDisposable, {s}ITrait<{s}>
             \\{{
             \\    /// <summary>What it wraps, which crosses as it is.</summary>
             \\    public {s} Raw;
@@ -1154,6 +1347,10 @@ const Gen = struct {
             \\    /// <summary>Null without a table. owned when it came from a return or a keep parameter.</summary>
             \\    public static {s}? FromRaw({s} raw, bool owned = false) => raw.table == null ? null : new(raw, owned ? (byte)1 : (byte)0);
             \\
+            \\    public static string TraitName => "{s}";
+            \\
+            \\    public static {s}? FromObject({s}AnyObject o, bool owned = false) => FromRaw({s}.FromObject(o), owned);
+            \\
             \\    /// <summary>One that calls impl. Dispose it once nothing's going to call it, unless it went to a keep parameter.</summary>
             \\    public static {s} From(I{s} impl) => new({s}.Of(new Adapter(impl)), 2);
             \\
@@ -1167,7 +1364,7 @@ const Gen = struct {
             \\        else if (how == 1) {s}Runtime.Release(r.AsObject());
             \\    }}
             \\
-        , .{ n, sys, raw, n, raw, n, raw, n, n, raw, raw, sal });
+        , .{ n, sys, sal, n, raw, n, raw, n, raw, t.name, n, sal, raw, n, n, raw, raw, sal });
         if (!g.o.core) try g.print(
             \\
             \\    /// <summary>The one the host has as name, or null.</summary>
@@ -1309,7 +1506,7 @@ const Gen = struct {
                 \\
             , .{ raw, x.name, p, sal, raw, sys, x.ref.array.len, try g.lower(child, "s[i]", "__keep"), p, x.name, raw, arrayOf(p), x.ref.array.len, x.ref.array.len, try g.lift(child, "s[i]", "false") });
         }
-        if (!g.o.core) for (g.fns.items) |f| try g.fnConverters(f);
+        if (!g.o.core) for (g.fns.items) |f| if (!f.base) try g.fnConverters(f);
         try g.print("}}\n", .{});
     }
 
@@ -1407,6 +1604,71 @@ test "writes C#" {
         "    global::System.Threading.Tasks.Task<string> FetchAsync(string url, global::System.Threading.CancellationToken cancel);",
     };
     for (want) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "types from an aliased file are used from its namespace" {
+    const source =
+        \\file "host/api.sal";
+        \\struct Vec3 { f32 x; f32 y; f32 z; }
+        \\struct Named { string name; }
+        \\trait Settings { u32 count(); }
+        \\file "pose.sal";
+        \\struct Pose { Vec3 at; Named who; }
+        \\trait Poser { void watch(keep Settings s); Vec3 where(); }
+    ;
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator, source, .{ .pointer_size = 8 }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{ .namespace = "Plugin", .source = source, .aliases = &.{.{ .prefix = "host/", .namespace = "Host.Api" }} }, &diag);
+    const text = out.written();
+    for ([_][]const u8{
+        "public global::Host.Api.Vec3 At { get; set; }",
+        "[global::System.Runtime.InteropServices.FieldOffset(0x10)] public global::Host.Api.Raw.Named who;",
+        "public global::Host.Api.Named Who { get; set; } = new();",
+        "public void Watch(global::Host.Api.Settings? s)",
+        "public delegate* unmanaged[Cdecl]<nuint, global::Host.Api.Raw.Settings, void> watch;",
+    }) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+    // Written once, where the alias says
+    for ([_][]const u8{ "struct Vec3", "class Named", "class Settings", "struct Settings" }) |part| try std.testing.expect(std.mem.indexOf(u8, text, part) == null);
+}
+
+test "what existing code declares is found by name, called, and hooked" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\struct Player {
+        \\    usize vt;
+        \\    [game.Sig("90")] void heal(f32 amount);
+        \\    [Virtual(3)] i32 damage(i32 amount);
+        \\    [game.Sig("91")] static Player* local;
+        \\    [game.Sig("92")] static u32 count;
+        \\}
+        \\[game.Sig("93")] i32 spawn(u32 kind, string name);
+    , .{ .pointer_size = 8, .any_namespace = true }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{ .namespace = "Game" }, &diag);
+    const text = out.written();
+    for ([_][]const u8{
+        "public static nuint Heal() => global::Salamander.Declared.Address(\"Player.heal\");",
+        "public static delegate* unmanaged[Cdecl]<global::Game.Player*, float, void> HealAt(nuint at)",
+        "        var __self = (Player*)global::System.Runtime.CompilerServices.Unsafe.AsPointer(ref this);\n        HealAt(global::Salamander.Declared.Address(\"Player.heal\"))(__self, amount);",
+        "DamageAt(global::Salamander.Declared.Virtual(__self, 3))(__self, amount);",
+        "public static global::Game.Player* Local() => *(global::Game.Player**)global::Salamander.Declared.Address(\"Player.local\");",
+        "public static uint* Count() => (uint*)global::Salamander.Declared.Address(\"Player.count\");",
+        "public static global::Salamander.AnyObject HealHandler(",
+        // Top-level ones go in the schema's class, with strings converted
+        "    public static int Spawn(uint kind, string name)",
+        "SpawnAt(global::Salamander.Declared.Address(\"spawn\"))(kind, global::Salamander.Str.From(name, __a));",
+    }) |part| if (std.mem.indexOf(u8, text, part) == null) {
         std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
         return error.TestUnexpectedResult;
     };
