@@ -24,6 +24,8 @@ pub const Pos = u32;
 
 /// What starts each file in a bundle, followed by its name and `";`.
 pub const bundle_marker = "file \"";
+/// What a parsed signature's function type is called, always at the top.
+pub const signature_name = "__signature";
 
 /// The bundled file `at` is in, like `plugin/game.sal`. Empty outside a bundle.
 pub fn fileOf(source: []const u8, at: usize) []const u8 {
@@ -406,7 +408,34 @@ pub const Trait = struct {
     bases: []const []const u8 = &.{},
     methods: []const Method = &.{},
     annotations: []const Annotation = &.{},
+    /// From `[Root]`: the host hands each plugin one of it, and each of its `accessors` gives one of
+    /// its namespace's objects, like `Wraith.tweaks()`.
+    root: bool = false,
 };
+
+/// A `[Root]` trait's method with no parameters that gives a trait, like `Tweaks tweaks();`.
+pub fn isAccessor(s: Schema, m: *const Method) bool {
+    if (m.static or m.async or m.signature.params.len > 0) return false;
+    return switch (m.signature.ret) {
+        .named => |n| s.findTrait(n) != null,
+        else => false,
+    };
+}
+
+pub const Accessor = struct {
+    root: *const Trait,
+    method: *const Method,
+};
+
+/// The root method that gives one of `trait_name`, for its static `instance`. The first if there are
+/// several.
+pub fn accessorOf(s: Schema, trait_name: []const u8) ?Accessor {
+    for (s.traits) |*t| {
+        if (!t.root) continue;
+        for (t.methods) |*m| if (s.isAccessor(m) and std.mem.eql(u8, m.signature.ret.named, trait_name)) return .{ .root = t, .method = m };
+    }
+    return null;
+}
 
 pub const Method = struct {
     name: []const u8,
@@ -601,6 +630,25 @@ pub fn traitHash(s: Schema, t: *const Trait) u64 {
         f.signature(m.signature);
     }
     return f.h;
+}
+
+/// The full name `written` means from namespace `ns`, the way names in schemas are found: `ns` and
+/// each one around it first, then as it is. So `Player.heal` from `Kai` is `Kai.Player.heal` if
+/// there's one. In `buf`, or `written` itself.
+pub fn nameFrom(s: Schema, buf: []u8, ns: []const u8, written: []const u8) []const u8 {
+    var at = ns;
+    while (at.len > 0) {
+        const full = std.fmt.bufPrint(buf, "{s}.{s}", .{ at, written }) catch return written;
+        if (s.declares(full)) return full;
+        at = at[0 .. std.mem.lastIndexOfScalar(u8, at, '.') orelse 0];
+    }
+    return written;
+}
+
+/// Whether something has this full name: a type, trait, constant, function or static.
+pub fn declares(s: Schema, name: []const u8) bool {
+    return s.findType(name) != null or s.findTrait(name) != null or s.findConstant(name) != null or
+        s.findFunction(name) != null or s.findStatic(name) != null;
 }
 
 pub fn findType(s: Schema, name: []const u8) ?*const Type {

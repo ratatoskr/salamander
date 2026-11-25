@@ -93,6 +93,8 @@ const ZigCounter = struct {
     total: u32 = 10,
     greeting: [64]u8 = undefined,
     numbers: [16]u32 = undefined,
+    pending: ?rt.Resolver(u32, null) = null,
+    pending_value: u32 = 0,
 
     pub fn add(self: *ZigCounter, n: u32) u32 {
         self.total += n;
@@ -169,8 +171,37 @@ const ZigCounter = struct {
         v.x += 1;
     }
 
+    pub fn soon(self: *ZigCounter, n: u32) rt.Promise(u32, null) {
+        const made = rt.Promise(u32, null).make() catch return .{};
+        self.pending = made.resolver;
+        self.pending_value = n + 1;
+        return made.promise;
+    }
+
     const table = rt.implement(schema.Counter, ZigCounter);
 };
+
+test "C#'s await carries on on the thread that settled what it awaited" {
+    const h = try traitsHost();
+    const start = try h.function(*const fn (schema.Counter) callconv(clr.cc) void, testing.allocator, traits, "StartSoon");
+    const got = try h.function(Get, testing.allocator, traits, "SoonGot");
+    const ran_here = try h.function(Get, testing.allocator, traits, "SoonRanHere");
+    var counter: ZigCounter = .{};
+    start(.init(&counter, ZigCounter.table));
+    try testing.expectEqual(0, got());
+
+    const Settler = struct {
+        fn go(c: *ZigCounter, here: Get, out: *i32) void {
+            c.pending.?.resolve(c.pending_value);
+            out.* = here();
+        }
+    };
+    var on_settler: i32 = 0;
+    const t = try std.Thread.spawn(.{}, Settler.go, .{ &counter, ran_here, &on_settler });
+    t.join();
+    try testing.expectEqual(2, got());
+    try testing.expectEqual(1, on_settler);
+}
 
 test "C# calls a trait Zig implements, raw" {
     const h = try traitsHost();

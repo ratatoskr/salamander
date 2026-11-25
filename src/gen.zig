@@ -1,7 +1,11 @@
-//! `salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]`
+//! `salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]`
 //! `salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]`
 //! `salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]`
-//! `--namespace NS` and `--class NAME` are where C# puts the schema, and its constants.
+//! `--namespace NS` is where files that don't say a namespace go, and C#'s home for its `Raw`. `--class
+//! NAME` is C#'s class with the constants.
+//! `--file-namespace PREFIX=NS` puts files whose names start with PREFIX in NS instead, like a
+//! dependency's `freecam/=Freecam`.
+//! `--global-use NS` lets every file use NS's types by their short names, like C#'s `global using`.
 //! `salamander-gen bundle <out.sal> <in>`
 //! `<in>` is a `.sal` file or a folder whose `.sal` files, nested too, make one schema.
 //! `--use NS` puts a tool's namespace in scope, like a `use` in every file.
@@ -38,6 +42,9 @@ pub fn main(init: std.process.Init) !void {
     var class: []const u8 = "Schema";
     var core = false;
     var uses: std.ArrayList([]const u8) = .empty;
+    var global_uses: std.ArrayList([]const u8) = .empty;
+    var default_namespace: []const u8 = "";
+    var file_namespaces: std.ArrayList(salamander_schema.FileNamespace) = .empty;
     var with: std.ArrayList([2][]const u8) = .empty;
     var aliases: std.ArrayList(salamander_zig.Alias) = .empty;
     var cs_aliases: std.ArrayList(salamander_cs.Alias) = .empty;
@@ -59,6 +66,15 @@ pub fn main(init: std.process.Init) !void {
             core = true;
         } else if (std.mem.eql(u8, arg, "--use")) {
             try uses.append(arena, args.next() orelse return usage());
+        } else if (std.mem.eql(u8, arg, "--global-use")) {
+            try global_uses.append(arena, args.next() orelse return usage());
+        } else if (std.mem.eql(u8, arg, "--default-namespace")) {
+            default_namespace = args.next() orelse return usage();
+        } else if (std.mem.eql(u8, arg, "--file-namespace")) {
+            // Like `freecam/=Freecam`
+            const spec = args.next() orelse return usage();
+            const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return usage();
+            try file_namespaces.append(arena, .{ .prefix = spec[0..eq], .namespace = spec[eq + 1 ..] });
         } else if (std.mem.eql(u8, arg, "--instance")) {
             // Like `wraith.Instance=Sig`
             const spec = args.next() orelse return usage();
@@ -82,7 +98,15 @@ pub fn main(init: std.process.Init) !void {
     if (is_bundle) return std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = source });
     var diag: Schema.Diagnostic = .{};
     // Annotations are for tools, so any namespace is fine here
-    var parsed = salamander_schema.parse(arena, source, .{ .pointer_size = pointer_size, .any_namespace = true, .uses = uses.items, .instances = instances.items }, &diag) catch |err| switch (err) {
+    var parsed = salamander_schema.parse(arena, source, .{
+        .pointer_size = pointer_size,
+        .any_namespace = true,
+        .uses = uses.items,
+        .global_uses = global_uses.items,
+        .namespace = default_namespace,
+        .file_namespaces = file_namespaces.items,
+        .instances = instances.items,
+    }, &diag) catch |err| switch (err) {
         error.InvalidSchema => fail(in_path, is_dir, diag.message()),
         else => return err,
     };
@@ -163,7 +187,7 @@ fn readFolder(arena: std.mem.Allocator, io: std.Io, path: []const u8, prefix: []
 
 fn usage() error{Usage} {
     std.debug.print(
-        \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]
+        \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]
         \\       salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]
         \\       salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]
         \\       salamander-gen bundle <out.sal> <in>

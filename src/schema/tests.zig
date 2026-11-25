@@ -453,6 +453,67 @@ test "names resolve from where they're written, outward" {
     try testing.expectEqualStrings("count", s.findStatic("Tools.count").?.static.name[6..]);
 }
 
+test "files with no namespace of their own get the one the options give" {
+    var parsed = try parseTest(
+        \\file "kai/player.sal";
+        \\struct Player { u32 hp; }
+        \\file "kai/world.sal";
+        \\namespace World { struct Cell { u8 kind; } }
+        \\file "wraith/math.sal";
+        \\namespace Wraith;
+        \\struct Vec3 { f32 x; f32 y; f32 z; }
+        \\struct Point { i32 x; i32 y; }
+        \\file "kai/party.sal";
+        \\struct Point { u8 slot; }
+        \\struct Party { Player* leader; Vec3 at; Point mine; Wraith.Point theirs; World.Cell cell; }
+    , .{ .file_namespaces = &.{.{ .prefix = "kai/", .namespace = "Kai" }}, .global_uses = &.{"Wraith"} });
+    defer parsed.deinit();
+    const s = parsed.schema;
+    try testing.expect(s.findType("Kai.Player") != null);
+    // A namespace it names is that one, not one inside its own
+    try testing.expect(s.findType("World.Cell") != null);
+    const party = s.findType("Kai.Party").?;
+    try testing.expectEqualStrings("Kai.Player", s.findField(party, "leader").?.type.pointer.named);
+    // A namespace every file uses, like C#'s `global using`, and its own namespace's is closer
+    try testing.expectEqualStrings("Wraith.Vec3", s.findField(party, "at").?.type.named);
+    try testing.expectEqualStrings("Kai.Point", s.findField(party, "mine").?.type.named);
+    try testing.expectEqualStrings("Wraith.Point", s.findField(party, "theirs").?.type.named);
+    try testing.expectEqualStrings("World.Cell", s.findField(party, "cell").?.type.named);
+}
+
+test "inside a type, what's nested in it comes first" {
+    var parsed = try parseTest(
+        \\namespace Wraith;
+        \\struct Event { u8 outer; }
+        \\trait Vfs { Event next(); Wraith.Event other(); }
+        \\namespace Vfs { struct Event { u8 inner; } struct Holder { Event e; } }
+        \\struct Elsewhere { Event e; Vfs.Event v; }
+    , .{});
+    defer parsed.deinit();
+    const s = parsed.schema;
+    const vfs = s.findTrait("Wraith.Vfs").?;
+    try testing.expectEqualStrings("Wraith.Vfs.Event", vfs.methods[0].signature.ret.named);
+    try testing.expectEqualStrings("Wraith.Event", vfs.methods[1].signature.ret.named);
+    try testing.expectEqualStrings("Wraith.Vfs.Event", s.findField(s.findType("Wraith.Vfs.Holder").?, "e").?.type.named);
+    const elsewhere = s.findType("Wraith.Elsewhere").?;
+    try testing.expectEqualStrings("Wraith.Event", s.findField(elsewhere, "e").?.type.named);
+    try testing.expectEqualStrings("Wraith.Vfs.Event", s.findField(elsewhere, "v").?.type.named);
+}
+
+test "namespaces every file uses are at the level of its own uses" {
+    var diag: Schema.Diagnostic = .{};
+    const source =
+        \\file "a.sal";
+        \\namespace A { struct X { u8 a; } }
+        \\namespace B { struct X { u8 b; } }
+        \\file "b.sal";
+        \\use B;
+        \\struct Y { X x; }
+    ;
+    try testing.expectError(error.InvalidSchema, schema.parse(testing.allocator, source, .{ .global_uses = &.{"A"} }, &diag));
+    try testing.expect(std.mem.indexOf(u8, diag.message(), "X could be") != null);
+}
+
 test "generics are made for each set of types they're used with" {
     var parsed = try parseTest(
         \\namespace Std {
@@ -507,6 +568,31 @@ test "namespace and generic mistakes say what's wrong" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "names given as text are found from a namespace, like they are in schemas" {
+    var sig_diag: Schema.Diagnostic = .{};
+    var with_home = schema.parseSignature(testing.allocator, "file \"kai/game.sal\";\nstruct Player { u32 hp; }", "fn void (Player* p)", .{ .file_namespaces = &.{.{ .prefix = "kai/", .namespace = "Kai" }}, .namespace = "Kai" }, &sig_diag) catch |err| {
+        std.debug.print("{s}\n", .{sig_diag.message()});
+        return err;
+    };
+    defer with_home.deinit();
+    // The signature's names are found from there, and its type's still at the top
+    const sig = with_home.schema.findType(schema.signature_name).?.kind.func;
+    try testing.expectEqualStrings("Kai.Player", sig.params[0].type.pointer.named);
+    var parsed = try parseTest(
+        \\file "kai/game.sal";
+        \\struct Player { [wraith.Sig("90")] void heal(u32 amount); }
+        \\file "other/game.sal";
+        \\namespace Other;
+        \\struct Player { [wraith.Sig("90")] void heal(f32 amount); }
+    , .{ .namespaces = wraith, .file_namespaces = &.{.{ .prefix = "kai/", .namespace = "Kai" }} });
+    defer parsed.deinit();
+    const s = parsed.schema;
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("Kai.Player.heal", s.nameFrom(&buf, "Kai", "Player.heal"));
+    try testing.expectEqualStrings("Other.Player.heal", s.nameFrom(&buf, "Kai", "Other.Player.heal"));
+    try testing.expectEqualStrings("Player.heal", s.nameFrom(&buf, "", "Player.heal"));
 }
 
 test "signatures name namespaced code and generics" {

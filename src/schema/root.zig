@@ -7,6 +7,7 @@ pub const plan = @import("plan.zig");
 const parser = @import("parse.zig");
 pub const Options = parser.Options;
 pub const Namespace = parser.Namespace;
+pub const FileNamespace = parser.FileNamespace;
 pub const InstanceTag = parser.InstanceTag;
 pub const Parsed = parser.Parsed;
 pub const parse = parser.parse;
@@ -19,7 +20,7 @@ test {
 }
 
 /// What `parseSignature` calls the function type it parsed.
-pub const signature_name = "__signature";
+pub const signature_name = Schema.signature_name;
 
 pub const SignatureError = parser.Error || error{NotASignature};
 
@@ -46,7 +47,9 @@ fn declared(gpa: @import("std").mem.Allocator, base: []const u8, name: []const u
     var parsed = try parse(gpa, base, options, diagnostic);
     errdefer parsed.deinit();
     const s = &parsed.schema;
-    const found = s.findFunction(name) orelse {
+    var buf: [512]u8 = undefined;
+    const full = s.nameFrom(&buf, options.namespace, name);
+    const found = s.findFunction(full) orelse {
         if (diagnostic) |d| d.print("there's no function or method named {s}", .{name});
         return error.InvalidSchema;
     };

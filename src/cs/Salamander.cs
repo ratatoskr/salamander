@@ -425,6 +425,27 @@ public interface ITrait<T> where T : class, ITrait<T>
     /// <summary>Null without a table. owned when the object's the caller's to let go of.</summary>
     static abstract T? FromObject(AnyObject o, bool owned = false);
 }
+
+/// <summary>
+/// The single objects of traits the host gives a plugin, like another plugin's service, by full trait
+/// name. Whatever loads the plugin sets them, and the generated Instance of each trait in a schema's
+/// singletons reads its own.
+/// </summary>
+public static class Singletons
+{
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, AnyObject> objects = new();
+
+    public static void Set(string trait, AnyObject obj) => objects[trait] = obj;
+
+    public static void Clear() => objects.Clear();
+
+    /// <summary>The one of T, or throws saying there's none.</summary>
+    public static T Get<T>() where T : class, ITrait<T>
+    {
+        if (objects.TryGetValue(T.TraitName, out var o) && T.FromObject(o) is { } found) return found;
+        throw new InvalidOperationException($"There's no {T.TraitName} here. Does the plugin depend on the one that offers it?");
+    }
+}
 /// <summary>
 /// Finds code a schema declares in what already exists, like a game's functions by signature, for the
 /// generated wrappers. Whatever loads this sets Locator, which gives an address or throws saying why.
@@ -484,17 +505,21 @@ public static unsafe class Promises
 
         public void call()
         {
+            // Settled first and tidied, then carried on, since carrying on runs the awaiting code
+            // right here, on the thread that settled it
+            Exception? failed = null;
+            P? value = default;
             try
             {
                 W w;
                 var code = promise.take(&w);
                 // Lifted here, since what the value points at is only good till this thread takes another
-                if (code == Abi.Ok) done.TrySetResult(lift(w));
-                else done.TrySetException(fail(code));
+                if (code == Abi.Ok) value = lift(w);
+                else failed = fail(code);
             }
             catch (Exception e)
             {
-                done.TrySetException(e);
+                failed = e;
             }
             finally
             {
@@ -502,13 +527,18 @@ public static unsafe class Promises
                 cancel.Dispose();
                 Abi.Free(data);
             }
+            if (failed != null) done.TrySetException(failed);
+            else done.TrySetResult(value!);
         }
     }
 
-    /// <summary>A task for p's value, lifted to C# with lift. Cancelling cancel cancels p.</summary>
+    /// <summary>
+    /// A task for p's value, lifted to C# with lift. Cancelling cancel cancels p. Awaiting it carries
+    /// on on the thread that settled p, so the host decides where code goes after an await.
+    /// </summary>
     public static Task<P> Await<W, P>(Raw.Promise p, CancellationToken cancel, Func<uint, Exception> fail, Func<W, P> lift) where W : unmanaged
     {
-        var done = new TaskCompletionSource<P>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var done = new TaskCompletionSource<P>();
         if (p.table == null)
         {
             done.SetException(fail(Abi.Gone));

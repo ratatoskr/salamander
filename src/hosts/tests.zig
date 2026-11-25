@@ -35,6 +35,8 @@ const Hello = struct {
     greeted: u32 = 0,
     buf: [64]u8 = undefined,
     len: usize = 0,
+    pending: ?rt.Resolver(u32, null) = null,
+    pending_value: u32 = 0,
 
     pub fn greet(self: *Hello, who: []const u8) []const u8 {
         self.greeted += 1;
@@ -75,7 +77,15 @@ const Hello = struct {
     pub fn wave(_: *Hello) error{Shy}!void {
         return rt.host().explain(error.Shy, "not before {d}", .{9});
     }
+    pub fn soon(self: *Hello, n: u32) Soon {
+        const made = Soon.make() catch return .{};
+        self.pending = made.resolver;
+        self.pending_value = n + 1;
+        return made.promise;
+    }
 };
+
+const Soon = rt.Promise(u32, null);
 
 /// What each language runs, and the module it imports.
 const Case = struct {
@@ -237,6 +247,63 @@ test "scripts in every language use native objects and give their own" {
         var num: B.Num = .{ .f = 3 };
         plugin.halve(&num);
         try testing.expectEqual(1.5, num.f);
+    }
+}
+
+/// Where scripts carry on: whichever thread settled the promise, through a queue it pumps.
+const Lanes = struct {
+    queue: rt.Queue,
+    handed_on: std.Thread.Id = 0,
+
+    fn run(ctx: ?*anyopaque, task: rt.Task) void {
+        const self: *Lanes = @ptrCast(@alignCast(ctx.?));
+        self.handed_on = std.Thread.getCurrentId();
+        self.queue.postTask(task) catch {};
+    }
+};
+
+test "scripts carry on where a native promise settled, through resume_on" {
+    const sources = [_]struct { language: hosts.Language, main: []const u8 }{
+        .{ .language = .js, .main =
+        \\import { greeter } from "app";
+        \\globalThis.got = 0;
+        \\(async () => { globalThis.got = await greeter.soon(41); })();
+        },
+        .{ .language = .lua, .main =
+        \\local app = require("app")
+        \\got = 0
+        \\task.spawn(function() got = app.greeter:soon(41):await() end)
+        },
+    };
+    for (sources) |case| {
+        var lanes: Lanes = .{ .queue = try rt.host().queue() };
+        const s = try hosts.create(case.language, .{
+            .gpa = testing.allocator,
+            .report = .{ .f = onReport },
+            .resume_on = .{ .ctx = &lanes, .run = Lanes.run },
+        });
+        defer s.deinit();
+        const types = try s.schema(source);
+        var hello: Hello = .{};
+        const greeter: rt.Object(Greeter) = .init(&hello, rt.implement(Greeter, Hello));
+        try s.module("app", &.{.{ .name = "greeter", .schema = types, .trait = "Greeter", .obj = .of(greeter) }});
+        try s.run(case.main, "main");
+        s.pump();
+
+        // Settled on another thread, which carries the script on from there
+        const Settler = struct {
+            fn go(h: *Hello, l: *Lanes, script: hosts.Script, ran_on: *std.Thread.Id) void {
+                h.pending.?.resolve(h.pending_value);
+                ran_on.* = std.Thread.getCurrentId();
+                _ = script.pumpQueue(l.queue, true);
+            }
+        };
+        var ran_on: std.Thread.Id = 0;
+        const t = try std.Thread.spawn(.{}, Settler.go, .{ &hello, &lanes, s, &ran_on });
+        t.join();
+        try testing.expectEqual(ran_on, lanes.handed_on);
+        var buf: [32]u8 = undefined;
+        try testing.expectEqualStrings("42", s.eval("got", &buf).value);
     }
 }
 
@@ -604,6 +671,87 @@ test "scripts find what's in a namespace under it" {
         try testing.expectEqualStrings("5 8 4 8 World.Counter", s.eval("out", &buf).value);
         try testing.expectEqual(5, World.counter.n);
         try testing.expectEqual(4, World.ticks);
+    }
+}
+
+const App = struct {
+    hello: *Hello,
+
+    pub fn greeter(self: *App) Greeter {
+        return .init(self.hello, rt.implement(Greeter, Hello));
+    }
+
+    pub fn version(_: *App) u32 {
+        return 7;
+    }
+};
+
+test "namespaces at the top are globals, and a root's accessors give its objects" {
+    const js =
+        \\globalThis.out = [World.twice(4), World.ticks, greeter().count(), Greeter.instance() === greeter(), App.instance().version()].join(" ");
+    ;
+    const lua_source =
+        \\out = table.concat({ World.twice(4), World.ticks, greeter():count(), tostring(Greeter.instance() == greeter()), App.instance():version() }, " ")
+    ;
+    const sources = [_][]const u8{ js, lua_source };
+    for (&cases, sources) |*case, text| {
+        World.counter = .{};
+        World.main = &World.counter;
+        World.ticks = 3;
+        var files: Files = .{ .case = case };
+        const s = try hosts.create(case.language, .{
+            .gpa = testing.allocator,
+            .resolver = .{ .ctx = &files, .resolve = Files.resolve, .read = Files.read },
+            .report = .{ .f = onReport },
+            .schema_options = .{ .any_namespace = true },
+            .locator = .{ .address = World.address, .read = Game.read, .write = Game.write },
+        });
+        defer s.deinit();
+        _ = try s.schema(World.schema);
+        const types = try s.schema(source);
+        var hello: Hello = .{ .greeted = 2 };
+        var app: App = .{ .hello = &hello };
+        const root: rt.Object(B.App) = .init(&app, rt.implement(B.App, App));
+        try s.globals(&.{.{ .name = "", .schema = types, .trait = "App", .obj = .of(root) }});
+        s.run(text, "globals") catch |e| {
+            std.debug.print("{t}: {s}\n", .{ case.language, s.lastError() });
+            return e;
+        };
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings("8 3 2 true 7", s.eval("out", &buf).value);
+    }
+}
+
+test "a single object that isn't a root is a function by its name, and its trait's instance" {
+    const sources = [_][]const u8{
+        "greeter().greet('a'); globalThis.out = `${greeter().count()} ${Greeter.instance() === greeter()}`;",
+        "greeter():greet('a'); out = greeter():count() .. ' ' .. tostring(Greeter.instance() == greeter())",
+    };
+    for (&cases, sources) |*case, text| {
+        var files: Files = undefined;
+        const s = try make(case, &files);
+        defer s.deinit();
+        const types = try s.schema(source);
+        var hello: Hello = .{};
+        const greeter: rt.Object(Greeter) = .init(&hello, rt.implement(Greeter, Hello));
+        try s.globals(&.{.{ .name = "", .schema = types, .trait = "Greeter", .obj = .of(greeter) }});
+        s.run(text, "single") catch |e| {
+            std.debug.print("{t}: {s}\n", .{ case.language, s.lastError() });
+            return e;
+        };
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings("1 true", s.eval("out", &buf).value);
+    }
+}
+
+test "a namespace can't hide a global the language has" {
+    for (&cases, [_][]const u8{ "namespace Math { struct X { u8 a; } }", "namespace table { struct X { u8 a; } }" }) |*case, text| {
+        var files: Files = undefined;
+        const s = try make(case, &files);
+        defer s.deinit();
+        _ = try s.schema(text);
+        try testing.expectError(error.Thrown, s.globals(&.{}));
+        try testing.expect(std.mem.indexOf(u8, s.lastError(), "would hide") != null);
     }
 }
 

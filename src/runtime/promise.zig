@@ -1,5 +1,6 @@
 //! `async` results. A promise is a `Promise` trait object, and whoever does the work holds its `Resolver`.
-//! Both point at one future the host keeps till both let go. Waiters run on the settling thread.
+//! Both point at one future the host keeps till both let go. Waiters run on the settling thread, or
+//! where the resolver says they carry on.
 
 const std = @import("std");
 
@@ -36,8 +37,10 @@ const Future = extern struct {
     code: u32 = 0,
     size: u32,
     waiter: Task = .{},
-    /// Where the waiter runs. No table is on the settling thread.
+    /// Where the waiter runs. No table is `carry_on`.
     where: Queue = .{},
+    /// The resolver's say for waiters with no `where`. No table is on the settling thread.
+    carry_on: Queue = .{},
     /// What the value points at. Only the resolver adds, before settling, and only `take` moves it.
     held: ?*Held = null,
 
@@ -71,7 +74,11 @@ const Future = extern struct {
         f.code = code;
         if (from) |v| @memcpy(f.value()[0..f.size], @as([*]const u8, @ptrCast(v))[0..f.size]);
         const was = f.bits.fetchOr(settled_bit, .acq_rel);
-        if (was & waiter_bit != 0 and was & cancelled_bit == 0) run(f.waiter, f.where);
+        if (was & waiter_bit != 0 and was & cancelled_bit == 0) run(f.waiter, f.target());
+    }
+
+    fn target(f: *const Future) Queue {
+        return if (f.where.table != null) f.where else f.carry_on;
     }
 
     fn run(task: Task, where: Queue) void {
@@ -106,7 +113,7 @@ const Future = extern struct {
         f.waiter = task;
         f.where = where;
         const was = f.bits.fetchOr(waiter_bit, .acq_rel);
-        if (was & settled_bit != 0) run(task, where);
+        if (was & settled_bit != 0) run(task, f.target());
     }
 
     /// Lets go and tells the resolver. A waiter already running isn't waited for.
@@ -145,6 +152,11 @@ const Future = extern struct {
 
     pub fn cancelled(f: *Future) bool {
         return f.bits.load(.acquire) & cancelled_bit != 0;
+    }
+
+    /// Before settling. Seen by waiters once they see it's settled.
+    pub fn carryOn(f: *Future, where: Queue) void {
+        f.carry_on = where;
     }
 
     /// Dropped without settling, so whoever waits gets `Gone`.
@@ -321,6 +333,12 @@ pub fn Resolver(comptime T: type, comptime Errors: ?type) type {
             return self.obj().cancelled();
         }
 
+        /// Before settling. Waiters with no queue of their own carry on from `where`, even ones
+        /// that come after it's settled.
+        pub fn carryOn(self: Self, where: rt.Queue) void {
+            self.obj().carryOn(where.raw());
+        }
+
         /// Not going to settle it. The waiter gets `Gone`.
         pub fn drop(self: Self) void {
             self.obj().drop();
@@ -417,4 +435,27 @@ test "settled from another thread" {
     }.run, .{pair.resolver});
     try testing.expectEqual(1 << 40, try pair.promise.wait());
     t.join();
+}
+
+test "waiters carry on where the resolver says, even ones that come after it's settled" {
+    const P = Promise(u32, null);
+    const Ran = struct {
+        n: u32 = 0,
+        fn hit(self: *@This()) void {
+            self.n += 1;
+        }
+    };
+    const q = try rt.host().queue();
+    for ([_]bool{ false, true }) |late| {
+        const pair = try P.make();
+        pair.resolver.carryOn(q);
+        var ran: Ran = .{};
+        if (!late) pair.promise.then(&ran, Ran.hit, .now);
+        pair.resolver.resolve(1);
+        if (late) pair.promise.then(&ran, Ran.hit, .now);
+        try testing.expectEqual(0, ran.n);
+        _ = q.poll();
+        try testing.expectEqual(1, ran.n);
+        try testing.expectEqual(1, try pair.promise.take().?);
+    }
 }

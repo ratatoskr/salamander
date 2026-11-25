@@ -92,8 +92,9 @@ const Gen = struct {
         return false;
     }
 
-    /// Whether `path` is a struct or union, whose members go in its own body.
+    /// Whether `path` is a struct, union or trait, whose members go in its own body.
     fn isRecord(g: *const Gen, path: []const u8) bool {
+        if (g.s.findTrait(path) != null) return true;
         const t = g.s.findType(path) orelse return false;
         return t.kind == .@"struct" or t.kind == .@"union";
     }
@@ -118,7 +119,7 @@ const Gen = struct {
             while (true) {
                 if (g.s.findType(path) != null or g.s.findTrait(path) != null or g.s.findConstant(path) != null) {
                     if (!g.isRecord(path)) {
-                        g.diag.print("{s}: Zig can't have it be a namespace too, since only structs and unions have room for what's in them", .{path});
+                        g.diag.print("{s}: Zig can't have it be a namespace too, since only structs, unions and traits have room for what's in them", .{path});
                         return error.NameClash;
                     }
                 }
@@ -127,6 +128,31 @@ const Gen = struct {
             const root = m.parent[0 .. std.mem.indexOfScalar(u8, m.parent, '.') orelse m.parent.len];
             if (!g.isRecord(root) and !contains(g.top.items, root)) try g.top.append(g.a, root);
         }
+    }
+
+    /// The game's code right in namespace `path` by its own names, like `Kai.addresses.spawn()` and
+    /// `Kai.Fns.spawn`, as structs' bodies have theirs.
+    fn namespaceCode(g: *Gen, path: []const u8, indent: []const u8) Error!void {
+        const w = g.w;
+        const s = g.s;
+        var statics: usize = 0;
+        var functions: usize = 0;
+        for (s.statics) |v| statics += @intFromBool(inNamespace(v.name, path));
+        for (s.functions) |f| functions += @intFromBool(inNamespace(f.name, path));
+        if (statics + functions == 0) return;
+        try w.print("{s}pub const addresses = struct {{\n", .{indent});
+        for (s.statics) |v| if (inNamespace(v.name, path)) try w.print("{s}    pub const {f} = generated.addresses.{f};\n", .{ indent, id(v.name[path.len + 1 ..]), id(v.name) });
+        for (s.functions) |f| if (inNamespace(f.name, path)) try w.print("{s}    pub const {f} = generated.addresses.{f};\n", .{ indent, id(f.name[path.len + 1 ..]), id(f.name) });
+        try w.print("{s}}};\n", .{indent});
+        if (functions == 0) return;
+        try w.print("{s}pub const Fns = struct {{\n", .{indent});
+        for (s.functions) |f| if (inNamespace(f.name, path)) try w.print("{s}    pub const {f} = generated.Fns.{f};\n", .{ indent, id(f.name[path.len + 1 ..]), id(f.name) });
+        try w.print("{s}}};\n", .{indent});
+    }
+
+    fn inNamespace(name: []const u8, path: []const u8) bool {
+        const end = lastDot(name) orelse return false;
+        return std.mem.eql(u8, name[0..end], path);
     }
 
     /// `pub const Node = generated.Scene_Node;` for each of `path`'s, and its namespaces as structs.
@@ -149,6 +175,7 @@ const Gen = struct {
             try subs.append(g.a, sub);
         }
         const inner = try std.fmt.allocPrint(g.a, "{s}    ", .{indent});
+        if (path.len > 0 and !g.isRecord(path)) try g.namespaceCode(path, indent);
         for (subs.items) |sub| {
             const seg = sub[if (lastDot(sub)) |d| d + 1 else 0..];
             if (names) |list| try g.claim(list, path, seg);
@@ -912,6 +939,9 @@ const Gen = struct {
         // Fields and decls share one namespace
         var members: std.ArrayList([]const u8) = .empty;
         for ([_][]const u8{ "data", "table", "salamander", "init", "self" }) |n| try members.append(g.a, n);
+        const accessor = g.s.accessorOf(name);
+        if (t.root) try g.claim(&members, name, "current");
+        if (t.root or accessor != null) try g.claim(&members, name, "instance");
         for (ms) |m| try g.claim(&members, name, m.name);
 
         try w.print(
@@ -986,6 +1016,25 @@ const Gen = struct {
             for (params.items, 0..) |n, i| try w.print("{s}{f}", .{ if (i > 0) ", " else if (pad) " " else "", id(n) });
             try w.writeAll(if (pad) " });\n    }\n" else "});\n    }\n");
         }
+        if (t.root) try w.print(
+            \\
+            \\    /// The plugin's own, set as it starts.
+            \\    pub var current: ?{f} = null;
+            \\
+            \\    /// Only once the plugin's started.
+            \\    pub fn instance() {f} {{
+            \\        return current orelse @panic("There's no {s} till the plugin's started");
+            \\    }}
+            \\
+        , .{ id(name), id(name), name }) else if (accessor) |a| try w.print(
+            \\
+            \\    /// The plugin's own, the same as `{s}.instance().{s}()`. Only once the plugin's started.
+            \\    pub fn instance() {f} {{
+            \\        return {f}.instance().{f}();
+            \\    }}
+            \\
+        , .{ a.root.name, a.method.name, id(name), id(a.root.name), id(a.method.name) });
+        try g.namespaceMembers(name, "    ", &members);
         try w.writeAll("};\n");
     }
 
@@ -1085,6 +1134,69 @@ test "writes the types" {
         "pub fn load(self: Mover, self_: []const u8) (LoadError || rt.Failure)!Vec3 {",
     };
     for (want) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "a trait holds what's in the namespace of its name" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\namespace Wraith;
+        \\trait Vfs { Event next(); }
+        \\namespace Vfs { enum Kind : u8 { open, read } struct Event { Kind kind; } }
+    , .{ .pointer_size = 8 }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{}, &diag);
+    const text = out.written();
+    const body = text[std.mem.indexOf(u8, text, "pub const Wraith_Vfs = extern struct {").?..];
+    const end = std.mem.indexOf(u8, body, "\n};\n").?;
+    try std.testing.expect(std.mem.indexOf(u8, body[0..end], "pub const Event = generated.Wraith_Vfs_Event;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body[0..end], "pub const Kind = generated.Wraith_Vfs_Kind;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "pub const Vfs = generated.Wraith_Vfs;") != null);
+}
+
+test "a root's traits each have their instance" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\namespace Host;
+        \\trait Tweaks { u32 count(); }
+        \\[Root] trait Api { Tweaks tweaks(); u32 version(); }
+    , .{ .pointer_size = 8 }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{}, &diag);
+    const text = out.written();
+    for ([_][]const u8{
+        "pub var current: ?Host_Api = null;",
+        "return current orelse @panic(\"There's no Host.Api till the plugin's started\");",
+        "pub fn instance() Host_Tweaks {\n        return Host_Api.instance().tweaks();",
+    }) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "a namespace has its own game code by their own names" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\namespace Kai;
+        \\[game.Sig("90")] static u32 count;
+        \\[game.Sig("91")] i32 spawn(u32 kind);
+    , .{ .pointer_size = 8, .any_namespace = true }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{}, &diag);
+    const text = out.written();
+    for ([_][]const u8{
+        "pub const Kai = struct {",
+        "    pub const addresses = struct {\n        pub const count = generated.addresses.Kai_count;\n        pub const spawn = generated.addresses.Kai_spawn;\n    };",
+        "    pub const Fns = struct {\n        pub const spawn = generated.Fns.Kai_spawn;\n    };",
+    }) |part| if (std.mem.indexOf(u8, text, part) == null) {
         std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
         return error.TestUnexpectedResult;
     };

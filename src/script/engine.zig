@@ -48,11 +48,14 @@ pub const Options = struct {
     stack_size: usize = 256 * 1024,
     /// Null waits.
     policy: ?Policy = null,
+    /// Where it carries on once a native promise settles. Null is its own queue, from `pump`.
+    resume_on: ?Resume = null,
     schema_options: SchemaOptions = .{},
     /// For the `schema` module.
     locator: ?Locator = null,
 
     pub const Policy = core.Policy;
+    pub const Resume = core.Resume;
     pub const Locator = core.Locator;
     pub const SchemaOptions = @import("salamander_schema").Options;
 };
@@ -86,10 +89,12 @@ pub const Script = struct {
         schema: *const fn (ptr: *anyopaque, source: []const u8) Error!*const Module,
         expose: *const fn (ptr: *anyopaque, name: []const u8, export_: Export) Error!void,
         module: *const fn (ptr: *anyopaque, name: []const u8, exports: []const Export) Error!void,
+        globals: *const fn (ptr: *anyopaque, roots: []const Export) Error!void,
         run: *const fn (ptr: *anyopaque, source: []const u8, name: []const u8) Error!void,
         eval: *const fn (ptr: *anyopaque, source: []const u8, buf: []u8) Evaluated,
         take: *const fn (ptr: *anyopaque, name: []const u8, schema: *const Module, trait: []const u8) Error!rt.AnyObject,
         pump: *const fn (ptr: *anyopaque) void,
+        pumpQueue: *const fn (ptr: *anyopaque, queue: rt.Queue, wait: bool) bool,
         interrupt: *const fn (ptr: *anyopaque) void,
         openScope: *const fn (ptr: *anyopaque, name: []const u8) Error!*Scope,
         closeScope: *const fn (ptr: *anyopaque, scope: *Scope) void,
@@ -118,6 +123,14 @@ pub const Script = struct {
         return self.vtable.module(self.ptr, name, exports);
     }
 
+    /// Each namespace at the top of the loaded schemas as a global, like `Wraith` and `Kai`, with
+    /// what's in it. Each of `roots` is a `[Root]` trait's object: its accessors are functions on its
+    /// namespace, like `Wraith.tweaks()`, and the traits they give get `instance()`. Fails with
+    /// nothing set if a namespace would hide one of the language's own globals, like `Math`.
+    pub fn globals(self: Script, roots: []const Export) Error!void {
+        return self.vtable.globals(self.ptr, roots);
+    }
+
     /// As a task so it can await at the top, then pumps.
     pub fn run(self: Script, source: []const u8, name: []const u8) Error!void {
         return self.vtable.run(self.ptr, source, name);
@@ -137,6 +150,12 @@ pub const Script = struct {
     /// Runs promise jobs and waiting tasks. Call often, like once a frame.
     pub fn pump(self: Script) void {
         self.vtable.pump(self.ptr);
+    }
+
+    /// Like `pump`, from `queue`, one a `Resume` posts to, on whatever thread pumps it. Without
+    /// `wait` it gives up if another thread's in, and gives false.
+    pub fn pumpQueue(self: Script, queue: rt.Queue, wait: bool) bool {
+        return self.vtable.pumpQueue(self.ptr, queue, wait);
     }
 
     /// From any thread. Lasts till `run`, `eval` or `pump` returns.
@@ -193,6 +212,9 @@ pub const Script = struct {
             fn module_(p: *anyopaque, name: []const u8, exports: []const Export) Error!void {
                 return self_(p).module(name, exports);
             }
+            fn globals_(p: *anyopaque, roots: []const Export) Error!void {
+                return self_(p).globals(roots);
+            }
             fn run_(p: *anyopaque, source: []const u8, name: []const u8) Error!void {
                 return self_(p).run(source, name);
             }
@@ -204,6 +226,9 @@ pub const Script = struct {
             }
             fn pump_(p: *anyopaque) void {
                 self_(p).pump();
+            }
+            fn pumpQueue_(p: *anyopaque, queue: rt.Queue, wait: bool) bool {
+                return self_(p).pumpQueue(queue, wait);
             }
             fn interrupt_(p: *anyopaque) void {
                 self_(p).interrupt();
@@ -243,10 +268,12 @@ pub const Script = struct {
                 .schema = schema_,
                 .expose = expose_,
                 .module = module_,
+                .globals = globals_,
                 .run = run_,
                 .eval = eval_,
                 .take = take_,
                 .pump = pump_,
+                .pumpQueue = pumpQueue_,
                 .interrupt = interrupt_,
                 .openScope = openScope_,
                 .closeScope = closeScope_,

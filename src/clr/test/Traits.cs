@@ -111,6 +111,30 @@ public static unsafe class Traits
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Thrown() => thrown;
+
+    /// <summary>Awaits c's soon, which Zig settles later on another thread.</summary>
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static void StartSoon(Sal.Raw.Counter c) => Soon.Start(Counter.FromRaw(c)!);
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int SoonGot() => Soon.Got;
+
+    /// <summary>Whether the code after the await ran on the thread asking now.</summary>
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static int SoonRanHere() => Soon.Thread == Environment.CurrentManagedThreadId ? 1 : 0;
+}
+
+// Async, so not in Traits
+static class Soon
+{
+    public static int Got;
+    public static int Thread;
+
+    public static async void Start(Counter c)
+    {
+        Got = (int)await c.SoonAsync(1);
+        Thread = Environment.CurrentManagedThreadId;
+    }
 }
 
 // A counter in plain C#, for Zig to call
@@ -173,6 +197,8 @@ sealed class PlainCounter : ICounter
         if (n == 0) throw new FailException(Fail.Bad);
         return n * 10;
     }
+
+    public Task<uint> SoonAsync(uint n, CancellationToken cancel) => Task.FromResult(n + 1);
 
     public void Bump(ref Vec3 v) => v.Y += 1;
 }

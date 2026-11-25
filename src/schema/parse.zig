@@ -30,10 +30,30 @@ pub const Options = struct {
     instances: []const InstanceTag = &.{},
     /// Namespaces tools registered, like `game`.
     namespaces: []const Namespace = &.{},
-    /// In scope without a `use`, so a tool's own files can say `[Sig]`.
+    /// Tools' namespaces in scope without a `use`, so a tool's own files can say `[Sig]`.
     uses: []const []const u8 = &.{},
+    /// Namespaces types are declared in that every file uses by their short names, like C#'s
+    /// `global using`. One nothing declares is skipped.
+    global_uses: []const []const u8 = &.{},
     /// Take any namespace, for tools that only read files.
     any_namespace: bool = false,
+    /// What's declared in a file with no `namespace X;` of its own goes in this namespace. Empty is
+    /// the top. A bundle's files can each have their own, by name, see `FileNamespace`.
+    namespace: []const u8 = "",
+    file_namespaces: []const FileNamespace = &.{},
+
+    /// The namespace for a file that doesn't say, by its name in a bundle.
+    pub fn namespaceOf(o: Options, file_name: []const u8) []const u8 {
+        for (o.file_namespaces) |f| if (std.mem.startsWith(u8, file_name, f.prefix)) return f.namespace;
+        return o.namespace;
+    }
+};
+
+/// The files in a bundle whose names start with `prefix`, like `kai/`, go in `namespace` unless they
+/// say otherwise.
+pub const FileNamespace = struct {
+    prefix: []const u8,
+    namespace: []const u8,
 };
 
 pub const Parsed = struct {
@@ -160,8 +180,9 @@ const Core = enum {
     winapi,
     x64,
     x86,
+    root,
 
-    const names = [_][]const u8{ "Offset", "Size", "Bit", "Virtual", "Cdecl", "Stdcall", "Thiscall", "Fastcall", "Winapi", "X64", "X86" };
+    const names = [_][]const u8{ "Offset", "Size", "Bit", "Virtual", "Cdecl", "Stdcall", "Thiscall", "Fastcall", "Winapi", "X64", "X86", "Root" };
 
     fn of(text: []const u8) ?Core {
         for (names, 0..) |n, i| if (std.mem.eql(u8, n, text)) return @fromBackingInt(@intCast(i));
@@ -213,6 +234,9 @@ const Parser = struct {
     uses: []const []const u8 = &.{},
     /// The namespace what's declared now goes in, like `Client.Game`. Empty at the top.
     ns: []const u8 = "",
+    /// `ns` is the file's own from the options, not one it said, so a `namespace X { }` at its top
+    /// is X itself rather than inside it.
+    implicit: bool = true,
     /// Outer namespaces of the `namespace X { }` blocks we're in.
     blocks: std.ArrayList([]const u8) = .empty,
     /// This file's `use`s of namespaces types are declared in, not tools'.
@@ -367,16 +391,21 @@ const Parser = struct {
         return p.dotted(ns, n);
     }
 
-    /// What's declared here is called, inside the namespace.
+    /// What's declared here is called, inside the namespace. A signature's made-up type is always at
+    /// the top, so it's found the same whichever namespace the names in it are looked up from.
     fn declName(p: *P, n: []const u8) Error![]const u8 {
+        if (std.mem.eql(u8, n, Schema.signature_name)) return n;
         return p.qualify(p.ns, n);
     }
 
     /// Every `namespace X` in the source, before parsing, so a `use` of one is known to be types'.
+    /// Files' own namespaces from the options count too.
     fn findNamespaces(p: *P) Error!void {
         // Each open block's namespace and the depth of its braces
         var open: std.ArrayList(struct { ns: []const u8, depth: usize }) = .empty;
-        var file_ns: []const u8 = "";
+        var file_ns: []const u8 = p.opts.namespaceOf("");
+        var implicit = true;
+        try p.declareNamespace(file_ns);
         var depth: usize = 0;
         var tok = scan(p.source, 0);
         while (tok.tag != .eof) : (tok = scan(p.source, tok.end)) {
@@ -390,14 +419,20 @@ const Parser = struct {
                 else => continue,
             }
             if (tok.tag != .ident) continue;
-            if (std.mem.eql(u8, p.text(tok), "file") and scan(p.source, tok.end).tag == .string) {
-                open.clearRetainingCapacity();
-                file_ns = "";
-                depth = 0;
-                continue;
+            if (std.mem.eql(u8, p.text(tok), "file")) {
+                const marked = scan(p.source, tok.end);
+                if (marked.tag == .string) {
+                    open.clearRetainingCapacity();
+                    file_ns = p.opts.namespaceOf(unquote(p.text(marked)));
+                    implicit = true;
+                    try p.declareNamespace(file_ns);
+                    depth = 0;
+                    tok = marked;
+                    continue;
+                }
             }
             if (!std.mem.eql(u8, p.text(tok), "namespace")) continue;
-            const outer = if (open.items.len > 0) open.items[open.items.len - 1].ns else file_ns;
+            const outer = if (open.items.len > 0) open.items[open.items.len - 1].ns else if (implicit) "" else file_ns;
             var next = scan(p.source, tok.end);
             if (next.tag != .ident) continue;
             var full: std.ArrayList(u8) = .empty;
@@ -411,6 +446,7 @@ const Parser = struct {
                     tok = next;
                     if (after.tag == .semicolon) {
                         file_ns = try p.arena.dupe(u8, full.items);
+                        implicit = false;
                     } else if (after.tag == .l_brace) {
                         try open.append(p.arena, .{ .ns = try p.arena.dupe(u8, full.items), .depth = depth });
                         depth += 1;
@@ -429,6 +465,26 @@ const Parser = struct {
 
     fn pushRegion(p: *P) Error!void {
         try p.regions.append(p.arena, .{ .start = p.tok.start, .ns = p.ns, .uses = p.type_uses });
+    }
+
+    /// `A.B.C` and the ones around it, as namespaces types are in.
+    fn declareNamespace(p: *P, full: []const u8) Error!void {
+        var rest = full;
+        while (rest.len > 0) {
+            try p.declared_namespaces.put(p.arena, rest, {});
+            rest = rest[0 .. std.mem.lastIndexOfScalar(u8, rest, '.') orelse 0];
+        }
+    }
+
+    /// Inside a type, what's nested in it comes first, like C#. So in `trait Vfs`, `Event` is
+    /// `Vfs.Event` if there's one. Its bases and a generic's own names don't count.
+    fn typeScope(region: Region, type_name: []const u8) Region {
+        if (std.mem.indexOfScalar(u8, type_name, '<') != null) return region;
+        // One declared outside where it's written, like a signature's, keeps the namespace's
+        if (region.ns.len > 0 and !(std.mem.startsWith(u8, type_name, region.ns) and type_name.len > region.ns.len and type_name[region.ns.len] == '.')) return region;
+        var inside = region;
+        inside.ns = type_name;
+        return inside;
     }
 
     /// The namespace and `use`s where `at` is.
@@ -453,10 +509,13 @@ const Parser = struct {
             _ = p.advance();
             if (p.blocks.items.len > 0) return p.fail(kw.start, "`namespace {s};` is for the whole file, so it can't go in a namespace's {{ }}", .{n});
             p.ns = n;
+            p.implicit = false;
         } else {
             _ = try p.expect(.l_brace, "';' or '{{'");
+            // Written at the top of a file that didn't say its namespace, it's the one it names
+            const outer = if (p.blocks.items.len == 0 and p.implicit) "" else p.ns;
             try p.blocks.append(p.arena, p.ns);
-            p.ns = try p.qualify(p.ns, n);
+            p.ns = try p.qualify(outer, n);
         }
         try p.pushRegion();
     }
@@ -464,6 +523,12 @@ const Parser = struct {
     fn endFile(p: *P) Error!void {
         if (p.blocks.items.len > 0) return p.fail(p.tok.start, "namespace {s} needs a '}}'", .{p.ns});
         p.ns = "";
+    }
+
+    /// A file's own namespace from the options, till it says otherwise.
+    fn startFile(p: *P, file_name: []const u8) void {
+        p.ns = p.opts.namespaceOf(file_name);
+        p.implicit = true;
     }
 
     fn registered(p: *const P, ns: []const u8) ?Namespace {
@@ -532,7 +597,7 @@ const Parser = struct {
                 if (ns.len > 0) return p.fail(tok.start, "[{s}] could be {s}.{s} or {s}.{s}. Write the one you mean", .{ n, ns, n, u, n });
                 ns = u;
             };
-            if (ns.len == 0) return p.fail(tok.start, "there's no [{s}]. The core ones are Offset, Size, Bit, Virtual, X64, X86 and the calling conventions. Others need their namespace, like [wraith.{s}], or a `use`", .{ n, n });
+            if (ns.len == 0) return p.fail(tok.start, "there's no [{s}]. The core ones are Offset, Size, Bit, Virtual, X64, X86, Root and the calling conventions. Others need their namespace, like [wraith.{s}], or a `use`", .{ n, n });
         }
         const list = if (p.tok.tag == .l_paren) try p.argList() else &.{};
         try extra.append(p, .{ .namespace = ns, .name = n, .args = list, .at = @intCast(tok.start) });
@@ -551,6 +616,7 @@ const Parser = struct {
             a.pointer_size = if (c == .x64) 8 else 4;
             return;
         }
+        if (c == .root) return;
         _ = try p.expect(.l_paren, "'('");
         switch (c) {
             .offset => a.offset = try p.number(usize, "an offset"),
@@ -717,6 +783,8 @@ const Parser = struct {
         var uses: List([]const u8) = .{};
         var type_uses: List([]const u8) = .{};
         for (p.opts.uses) |u| try p.useNamespace(&uses, 0, u);
+        // Like C#'s `global using`, at the same level as the file's own
+        for (p.opts.global_uses) |u| if (p.declared_namespaces.contains(u)) try type_uses.append(p, u);
         while (p.isKeyword("use")) {
             const at = p.advance().start;
             const ns = try p.dottedName("a namespace");
@@ -733,7 +801,7 @@ const Parser = struct {
     }
 
     fn file(p: *P) Error!Schema {
-        if (p.isKeyword("file")) try p.fileMarker();
+        if (p.isKeyword("file")) try p.fileMarker() else p.startFile("");
         try p.uses_();
         const first_uses = p.uses;
 
@@ -842,8 +910,14 @@ const Parser = struct {
     /// `file "name.sal";`, which a bundle puts before each file.
     fn fileMarker(p: *P) Error!void {
         _ = p.advance();
-        _ = try p.expect(.string, "the file's name, in quotes");
+        const marked = try p.expect(.string, "the file's name, in quotes");
         _ = try p.expect(.semicolon, "';'");
+        p.startFile(unquote(p.text(marked)));
+    }
+
+    /// A bundle's file name, which `bundle` keeps free of quotes and newlines.
+    fn unquote(s: []const u8) []const u8 {
+        return if (s.len >= 2) s[1 .. s.len - 1] else s;
     }
 
     /// A field's own bitfield goes in `types` too. A generic one's type parameters go in `params`.
@@ -1081,7 +1155,7 @@ const Parser = struct {
 
     fn traitDef(p: *P, a: Anns) Error!Schema.Trait {
         const kw = p.advance();
-        try p.allow(a, &.{}, "a trait");
+        try p.allow(a, &.{.root}, "a trait");
         const trait_name = try p.declName(try p.name("the trait's name"));
         var bases: List([]const u8) = .{};
         if (p.tok.tag == .colon) {
@@ -1126,7 +1200,7 @@ const Parser = struct {
         }
         _ = p.advance();
         p.optionalSemicolon();
-        return .{ .name = trait_name, .at = @intCast(kw.start), .bases = try bases.done(p), .methods = try methods.done(p), .annotations = a.extra };
+        return .{ .name = trait_name, .at = @intCast(kw.start), .bases = try bases.done(p), .methods = try methods.done(p), .annotations = a.extra, .root = a.has(.root) };
     }
 
     fn implDef(p: *P, a: Anns) Error!Schema.Impl {
@@ -1237,7 +1311,7 @@ const Parser = struct {
         const declared = r.types.items.len;
         for (0..declared) |i| {
             const t = r.types.items[i];
-            const done = try r.typeDef(t, p.regionAt(t.at), .{});
+            const done = try r.typeDef(t, typeScope(p.regionAt(t.at), t.name), .{});
             r.types.items[i] = done;
         }
         const traits = try p.arena.dupe(Schema.Trait, s.traits);
@@ -1246,8 +1320,9 @@ const Parser = struct {
             const bases = try p.arena.alloc([]const u8, t.bases.len);
             for (t.bases, bases) |b, *out| out.* = try r.name(b, region, .{}, t.at);
             t.bases = bases;
+            const inside = typeScope(region, t.name);
             const methods = try p.arena.dupe(Schema.Method, t.methods);
-            for (methods) |*m| m.signature = try r.signature(m.signature, region, .{}, m.at);
+            for (methods) |*m| m.signature = try r.signature(m.signature, inside, .{}, m.at);
             t.methods = methods;
         }
         const impls = try p.arena.dupe(Schema.Impl, s.impls);

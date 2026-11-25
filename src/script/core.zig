@@ -21,6 +21,14 @@ pub const Policy = struct {
     how: *const fn (ctx: ?*anyopaque) Gate.How,
 };
 
+/// Where a script carries on once a native promise it awaits settles. Called on the thread that
+/// settled it, with the task to run there or post on, which copes with the script being gone. So
+/// `ctx` has to outlive the script. Null runs every one from the script's own queue.
+pub const Resume = struct {
+    ctx: ?*anyopaque = null,
+    run: *const fn (ctx: ?*anyopaque, task: rt.Task) void,
+};
+
 /// Held briefly, and never while calling out.
 pub const SpinLock = struct {
     held: std.atomic.Value(u32) = .init(0),
@@ -70,6 +78,8 @@ pub fn Core(comptime L: type) type {
         gate: Gate = .{},
         /// Null waits.
         policy: ?Policy = null,
+        /// Null carries on from `queue`.
+        resume_on: ?Resume = null,
         schema_options: salamander_schema.Options = .{},
         /// Without it the `schema` module finds nothing.
         locator: ?Locator = null,
@@ -578,6 +588,21 @@ pub fn Core(comptime L: type) type {
             self.gate.leave();
         }
 
+        /// Has `settled(a)` run once `promise` settles, from `queue`, or through `resume_on` from the
+        /// thread that settled it. `a` keeps the hook in its `resume_on`, since the script may be gone
+        /// by then, and `settled` has to cope with that.
+        pub fn thenSettled(self: *Self, promise: rt.core.Promise, a: anytype, comptime settled: fn (@TypeOf(a)) void) void {
+            const r = self.resume_on orelse return promise.then(rt.Task.init(a, settled), self.queue.raw());
+            a.resume_on = r;
+            const Hop = struct {
+                fn call(w: @TypeOf(a)) void {
+                    const on = w.resume_on.?;
+                    on.run(on.ctx, rt.Task.init(w, settled));
+                }
+            };
+            promise.then(rt.Task.init(a, Hop.call), .{});
+        }
+
         // Scopes
 
         /// Set `current` to it to keep objects in it.
@@ -744,6 +769,16 @@ pub fn explainThrown(host: rt.Host, schema: ?Schema, errors: ?[]const u8, code: 
 }
 
 /// `Unsupported` for names nobody knows.
+/// What scripts call a single object of `trait_name`: its last part with a small first letter, like
+/// `camera` for `Freecam.Camera`. In `buf`.
+pub fn singletonName(buf: []u8, trait_name: []const u8) []const u8 {
+    const leaf = trait_name[if (Schema.namespaceEnd(trait_name)) |e| e + 1 else 0..];
+    const n = @min(leaf.len, buf.len);
+    @memcpy(buf[0..n], leaf[0..n]);
+    if (n > 0) buf[0] = std.ascii.toLower(buf[0]);
+    return buf[0..n];
+}
+
 pub fn errorCode(schema: Schema, errors: ?[]const u8, name: []const u8) u32 {
     if (errors) |set| if (schema.findType(set)) |t| if (t.kind == .@"error") {
         for (t.kind.@"error".errors) |e| if (std.mem.eql(u8, e.name, name)) return e.code;

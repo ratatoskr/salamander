@@ -121,13 +121,14 @@ pub const Resolver = extern struct {
 
     pub const salamander = struct {
         pub const name = "Resolver";
-        pub const hash: u64 = 0x36b9c4456ab599f2;
+        pub const hash: u64 = 0x58ad2c091e08d863;
         pub const methods: []const rt.Method = &.{
             .{ .name = "hold", .Fn = fn (usize, usize) ?*anyopaque, .sig = 0x4ce616ab4981d471 },
             .{ .name = "resolve", .Fn = fn (?*anyopaque) void, .sig = 0xf9af40e92db492a3 },
             .{ .name = "reject", .Fn = fn (u32) void, .sig = 0x481ba51db9c20bd7 },
             .{ .name = "cancelled", .Fn = fn () bool, .sig = 0x76a264675e4f418f },
             .{ .name = "drop", .Fn = fn () void, .sig = 0x1188479494fbb434 },
+            .{ .name = "carryOn", .Fn = fn (Queue) void, .sig = 0xb826e2728c0b6f4f },
         };
     };
 
@@ -158,6 +159,10 @@ pub const Resolver = extern struct {
 
     pub fn drop(self: Resolver) void {
         return rt.invoke(Resolver, "drop", self, .{});
+    }
+
+    pub fn carryOn(self: Resolver, where: Queue) void {
+        return rt.invoke(Resolver, "carryOn", self, .{where});
     }
 };
 

@@ -54,6 +54,7 @@ pub fn create(options: engine.Options) !engine.Script {
     self.binder = Binder.init(gpa, ctx, .{ .host = host, .queue = queue, .report = binderReport }) catch return error.OutOfMemory;
     self.binder.user = self;
     self.binder.core.policy = options.policy;
+    self.binder.core.resume_on = options.resume_on;
     self.binder.core.schema_options = options.schema_options;
     self.binder.core.locator = options.locator;
     c.JS_SetContextOpaque(ctx, self);
@@ -221,6 +222,21 @@ pub fn module(self: *Script, name: []const u8, exports: []const engine.Export) e
     try self.natives.add(self.gpa, name, exports);
 }
 
+pub fn globals(self: *Script, roots: []const engine.Export) engine.Error!void {
+    self.binder.core.enter();
+    defer self.binder.core.leave();
+    var buf: [128]u8 = undefined;
+    const clash = self.binder.schemaGlobals(&buf) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Exception => self.keepPending(),
+    };
+    if (clash) |n| return self.failed("the namespace {s} would hide JavaScript's own {s}", .{ n, n });
+    for (roots) |r| self.binder.exposeRoot(r.schema, r.trait, r.obj) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Exception => self.keepPending(),
+    };
+}
+
 pub fn run(self: *Script, source: []const u8, name: []const u8) engine.Error!void {
     self.binder.core.enter();
     defer self.binder.core.leave();
@@ -235,7 +251,7 @@ pub fn run(self: *Script, source: []const u8, name: []const u8) engine.Error!voi
     defer c.JS_FreeValue(self.ctx, result);
     if (c.JS_IsException(result)) return self.keepPending();
     // A module runs as a promise since it may await at the top
-    self.pumpJobs();
+    self.pumpJobs(self.queue);
     if (c.JS_PromiseState(self.ctx, result) == c.JS_PROMISE_REJECTED) {
         self.forgetRejection(result);
         const why = c.JS_PromiseResult(self.ctx, result);
@@ -259,7 +275,7 @@ pub fn eval(self: *Script, source: []const u8, buf: []u8) engine.Evaluated {
         describe(ctx, e, &w);
         return .{ .thrown = w.buffered() };
     }
-    self.pumpJobs();
+    self.pumpJobs(self.queue);
     show(ctx, v, &w);
     return .{ .value = w.buffered() };
 }
@@ -307,13 +323,13 @@ pub fn pump(self: *Script) void {
     self.binder.core.enter();
     defer self.binder.core.leave();
     defer self.interrupted.store(false, .monotonic);
-    self.pumpJobs();
+    self.pumpJobs(self.queue);
 }
 
-fn pumpJobs(self: *Script) void {
+fn pumpJobs(self: *Script, queue: rt.Queue) void {
     // Settling can queue jobs, and jobs can settle, so round a few times
     for (0..64) |_| {
-        const polled = self.queue.poll();
+        const polled = queue.poll();
         var ran = false;
         var pctx: ?*qjs.Context = null;
         while (true) {
@@ -329,6 +345,15 @@ fn pumpJobs(self: *Script) void {
         if (polled == 0 and !ran) break;
     }
     self.reportRejections();
+}
+
+/// Like `pump`, from another queue that `resume_on` posts to, on this thread.
+pub fn pumpQueue(self: *Script, queue: rt.Queue, wait: bool) bool {
+    if (wait) self.binder.core.enter() else if (!self.binder.core.tryEnter()) return false;
+    defer self.binder.core.leave();
+    defer self.interrupted.store(false, .monotonic);
+    self.pumpJobs(queue);
+    return true;
 }
 
 pub fn interrupt(self: *Script) void {

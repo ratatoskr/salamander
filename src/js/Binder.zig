@@ -80,6 +80,7 @@ const Await = struct {
     funcs: [2]Value,
     trait: *Trait,
     slot: usize,
+    resume_on: ?script.Resume = null,
 };
 
 pub fn init(gpa: Allocator, ctx: *qjs.Context, options: Options) error{ OutOfMemory, Exception }!*Binder {
@@ -689,6 +690,100 @@ fn namespaceIn(b: *Binder, all: Value, name: []const u8) convert.Error!struct { 
     return .{ try b.objectIn(all, name[0..end]), name[end + 1 ..] };
 }
 
+// Globals: each namespace at the top, like `Wraith`, and what `[Root]` objects give
+
+/// Each namespace at the top of what's loaded, like `Wraith` and `Kai`, as a global with what's in
+/// it. Gives the name of one that would hide a global JS has already, like `Math`, copied into
+/// `clash`, setting none.
+pub fn schemaGlobals(b: *Binder, clash: []u8) convert.Error!?[]const u8 {
+    const ctx = b.ctx;
+    var arena: std.heap.ArenaAllocator = .init(b.core.gpa);
+    defer arena.deinit();
+    var names: std.ArrayList([:0]const u8) = .empty;
+    try b.schemaExports(&names, arena.allocator());
+    const g = c.JS_GetGlobalObject(ctx);
+    defer c.JS_FreeValue(ctx, g);
+    for (names.items) |n| {
+        const have = qjs.get(ctx, g, n);
+        defer c.JS_FreeValue(ctx, have);
+        if (c.JS_IsUndefined(have)) continue;
+        const len = @min(n.len, clash.len);
+        @memcpy(clash[0..len], n[0..len]);
+        return clash[0..len];
+    }
+    const all = try b.schemaObject();
+    defer c.JS_FreeValue(ctx, all);
+    for (names.items) |n| qjs.set(ctx, g, n, qjs.get(ctx, all, n));
+    return null;
+}
+
+/// A `[Root]` object of `trait` in `m`. Each accessor, like `tweaks()`, is a function on its
+/// namespace's global, like `Wraith.tweaks()`, and each trait one gives has `instance()` the same.
+/// So does the root's own trait, giving it.
+pub fn exposeRoot(b: *Binder, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) convert.Error!void {
+    const ctx = b.ctx;
+    const t = try b.trait(m, trait_name);
+    const root = try b.wrap(t, obj);
+    defer c.JS_FreeValue(ctx, root);
+    const g = c.JS_GetGlobalObject(ctx);
+    defer c.JS_FreeValue(ctx, g);
+    const s = m.schema();
+    const decl = s.findTrait(trait_name) orelse return;
+    const ns = if (Schema.namespaceEnd(trait_name)) |end| try b.objectIn(g, trait_name[0..end]) else c.JS_DupValue(ctx, g);
+    defer c.JS_FreeValue(ctx, ns);
+    if (!decl.root) {
+        // Just the one, like a plugin's service: `Freecam.camera()` and `Freecam.Camera.instance()`
+        const f = try b.accessor(root, "");
+        var buf: [128]u8 = undefined;
+        qjs.set(ctx, ns, script.singletonName(&buf, trait_name), c.JS_DupValue(ctx, f));
+        const own = try b.objectIn(g, trait_name);
+        defer c.JS_FreeValue(ctx, own);
+        qjs.set(ctx, own, "instance", f);
+        return;
+    }
+    for (decl.methods) |*method| {
+        if (!s.isAccessor(method)) continue;
+        const f = try b.accessor(root, method.name);
+        qjs.set(ctx, ns, method.name, c.JS_DupValue(ctx, f));
+        const holder = try b.objectIn(g, method.signature.ret.named);
+        defer c.JS_FreeValue(ctx, holder);
+        qjs.set(ctx, holder, "instance", f);
+    }
+    const own = try b.objectIn(g, trait_name);
+    defer c.JS_FreeValue(ctx, own);
+    qjs.set(ctx, own, "instance", try b.accessor(root, ""));
+}
+
+/// Calls `root[method]()` once and gives that each time after, or `root` itself for "".
+fn accessor(b: *Binder, root: Value, method: []const u8) convert.Error!Value {
+    const ctx = b.ctx;
+    const cache = c.JS_NewObject(ctx);
+    if (c.JS_IsException(cache)) return error.Exception;
+    var data = [_]Value{ root, qjs.string(ctx, method), cache };
+    defer c.JS_FreeValue(ctx, data[1]);
+    defer c.JS_FreeValue(ctx, cache);
+    const f = c.JS_NewCFunctionData(ctx, accessorJs, 0, 0, data.len, &data);
+    if (c.JS_IsException(f)) return error.Exception;
+    return f;
+}
+
+fn accessorJs(ctx_: ?*qjs.Context, _: Value, _: c_int, _: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    const root = data[0];
+    const name = qjs.toString(ctx, data[1]) orelse return qjs.throw(ctx, "a root's accessor lost its name", .{});
+    defer name.free();
+    if (name.slice().len == 0) return c.JS_DupValue(ctx, root);
+    const got = qjs.get(ctx, data[2], "value");
+    if (!c.JS_IsUndefined(got)) return got;
+    const method = qjs.get(ctx, root, name.slice());
+    defer c.JS_FreeValue(ctx, method);
+    var none = [_]Value{qjs.undefined_value};
+    const v = c.JS_Call(ctx, method, root, 0, &none);
+    if (c.JS_IsException(v)) return v;
+    qjs.set(ctx, data[2], "value", c.JS_DupValue(ctx, v));
+    return v;
+}
+
 /// The object at `path` under `all`, like `Scene.Node`, made with any on the way if they're not
 /// there. Caller frees it.
 fn objectIn(b: *Binder, all: Value, path: []const u8) convert.Error!Value {
@@ -1023,7 +1118,7 @@ fn awaitPromise(b: *Binder, t: *Trait, slot: usize, promise: rt.core.Promise) Va
         gpa.destroy(a);
         return c.JS_ThrowOutOfMemory(ctx);
     };
-    promise.then(rt.Task.init(a, settled), b.core.queue.raw());
+    b.core.thenSettled(promise, a, settled);
     return p;
 }
 

@@ -24,7 +24,7 @@ pub const Error = std.Io.Writer.Error || error{ OutOfMemory, NameClash };
 pub const Options = struct {
     /// Where it came from, for the header.
     label: []const u8 = "schema.sal",
-    /// The namespace it all goes in. None if empty.
+    /// Where what has no schema namespace goes, with `Raw`, the converters and `class`. None if empty.
     namespace: []const u8 = "",
     /// The static class with the schema's constants and `PointerSize`.
     class: []const u8 = "Schema",
@@ -33,10 +33,14 @@ pub const Options = struct {
     /// The bundle's text, so `aliases` can tell which file each thing came from.
     source: []const u8 = "",
     aliases: []const Alias = &.{},
+    /// Traits the host gives one of, by full name, like a dependency's services. Each gets an
+    /// `Instance` that reads `Salamander.Singletons`.
+    singletons: []const []const u8 = &.{},
 };
 
-/// Everything declared in bundled files whose names start with `prefix`, like `wraith/`, is used from
-/// the C# namespace `namespace` instead, where it's already been written, like the Zig generator's.
+/// Everything declared in bundled files whose names start with `prefix`, like `wraith/`, has already
+/// been written somewhere else, so it's used from there. `namespace` is that file's home namespace,
+/// where its `Raw` and anything without a schema namespace are.
 pub const Alias = struct {
     prefix: []const u8,
     namespace: []const u8,
@@ -73,7 +77,7 @@ const helper_locals = [_][]const u8{ "self", "t", "r", "e", "data", "table", "f"
 const trait_members = [_][]const u8{ "data", "table", "Info", "AsObject", "FromObject", "Of", "Unowned", "Free", "Implemented" };
 
 /// What every trait's class has.
-const wrapper_members = [_][]const u8{ "Raw", "FromRaw", "From", "Dispose", "TraitName", "FromObject", "Provided", "Provide", "Adapter" };
+const wrapper_members = [_][]const u8{ "Raw", "FromRaw", "From", "Dispose", "TraitName", "FromObject", "Provided", "Provide", "Adapter", "Instance" };
 
 /// The last part of a name, like `spawn` for `Game.spawn`.
 fn leafOf(n: []const u8) []const u8 {
@@ -209,11 +213,13 @@ const Gen = struct {
         return if (ns.len > 0) g.fmt("{s}.", .{ns}) catch "" else "";
     }
 
-    /// Where a plain type is, like `global::Game.Scene.Node`, with `prefix` before its last part.
+    /// Where a plain type is, like `global::Game.Scene.Node`, with `prefix` before its last part. Its
+    /// schema namespace is its C# one, and one without goes in the home namespace, its alias's if it
+    /// has one.
     fn plainRefWith(g: *Gen, n: []const u8, prefix: []const u8) Error![]const u8 {
         const end = Schema.namespaceEnd(n);
-        const path = if (end) |e| try g.fmt("{s}.", .{n[0..e]}) else "";
-        return g.fmt("global::{s}{s}{s}{s}", .{ g.nsDotOf(n), path, prefix, try g.leaf(n) });
+        const path = if (end) |e| try g.fmt("{s}.", .{n[0..e]}) else g.nsDotOf(n);
+        return g.fmt("global::{s}{s}{s}", .{ path, prefix, try g.leaf(n) });
     }
 
     fn plainRef(g: *Gen, n: []const u8) Error![]const u8 {
@@ -843,7 +849,8 @@ const Gen = struct {
         const path = if (name.len == 0) "" else name[0..@min(end, name.len)];
         const scope = if (Schema.namespaceEnd(name) == null) "" else path;
         var ns: std.ArrayList(u8) = .empty;
-        try ns.appendSlice(g.a, g.o.namespace);
+        // Only what has no namespace of its own goes in the home one
+        if (scope.len == 0) try ns.appendSlice(g.a, g.o.namespace);
         var nested: std.ArrayList([]const u8) = .empty;
         var i: usize = 0;
         while (i < scope.len) {
@@ -1312,6 +1319,32 @@ const Gen = struct {
         , .{ sal, sal, @max(count, 1), sal });
     }
 
+    /// The plugin's one of it, for a `[Root]` trait and each trait its methods give, like
+    /// `Wraith.Tweaks.Instance`. The root's is set as the plugin starts.
+    fn instance(g: *Gen, t: *const Schema.Trait, n: []const u8) Error!void {
+        if (t.root) return g.print(
+            \\
+            \\    /// <summary>The plugin's own, set as it starts. Null before then.</summary>
+            \\    public static {s}? Instance {{ get; internal set; }}
+            \\
+        , .{n});
+        for (g.o.singletons) |s| if (std.mem.eql(u8, s, t.name)) return g.print(
+            \\
+            \\    /// <summary>The one the host gives this plugin, like a plugin it depends on offers. Throws if there's none.</summary>
+            \\    public static {s} Instance => global::Salamander.Singletons.Get<{s}>();
+            \\
+        , .{ n, n });
+        const a = g.s.accessorOf(t.name) orelse return;
+        const root = try g.plainRef(a.root.name);
+        const method = (try g.plainSig(a.method, a.method.name, null)).name;
+        try g.print(
+            \\
+            \\    /// <summary>The plugin's own, the same as {s}.Instance.{s}().</summary>
+            \\    public static {s} Instance => {s}.Instance?.{s}() ?? throw new {s}InvalidOperationException("There's no {s} till the plugin's started");
+            \\
+        , .{ try g.leaf(a.root.name), method, n, root, method, sys, t.name });
+    }
+
     /// A trait's class, wrapping its raw object, and its interface.
     fn wrapper(g: *Gen, t: *const Schema.Trait) Error!void {
         const n = try g.leaf(t.name);
@@ -1388,6 +1421,7 @@ const Gen = struct {
             \\    }}
             \\
         , .{ n, sal, raw, sal, sal, raw, sal, sal, sal, sys });
+        if (!g.o.core) try g.instance(t, n);
 
         for (ms) |m| {
             const sig = try g.plainSig(m, m.name, " = default");
@@ -1579,7 +1613,8 @@ test "writes C#" {
         "    Corrupt = 7,",
         "public enum Job : byte",
         "readonly get => (global::Game.Job)(((ulong)Raw >> 12) & 0x3UL);",
-        "namespace Game.Scene\n{\n",
+        // A schema namespace is its own, not inside the home one
+        "namespace Scene\n{\n",
         // Tagged holds a string and a slice, so it's a class with a raw twin
         "public sealed unsafe partial class Tagged\n{\n    public string Tag { get; set; } = \"\";\n    public uint[] Ids { get; set; } = [];",
         "        tag = global::Salamander.Str.From(Tag, __a),",
@@ -1607,6 +1642,42 @@ test "writes C#" {
         std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
         return error.TestUnexpectedResult;
     };
+}
+
+test "a root's traits each have their Instance" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\namespace Host;
+        \\trait Tweaks { u32 count(); }
+        \\trait Ui { void draw(); }
+        \\[Root] trait Api { Tweaks tweaks(); Ui ui(); u32 version(); }
+    , .{ .pointer_size = 8 }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{ .namespace = "Host" }, &diag);
+    const text = out.written();
+    for ([_][]const u8{
+        "namespace Host\n{\n",
+        "public static Api? Instance { get; internal set; }",
+        "public static Tweaks Instance => global::Host.Api.Instance?.Tweaks() ?? throw new global::System.InvalidOperationException(\"There's no Host.Tweaks till the plugin's started\");",
+        "public static Ui Instance => global::Host.Api.Instance?.Ui() ??",
+    }) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "a singleton trait's Instance reads what the host set" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator, "namespace Freecam;\ntrait Camera { void reset(); }\ntrait Other { void go(); }", .{ .pointer_size = 8 }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{ .namespace = "Plugin", .singletons = &.{"Freecam.Camera"} }, &diag);
+    const text = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, text, "public static Camera Instance => global::Salamander.Singletons.Get<Camera>();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Other Instance") == null);
 }
 
 test "types from an aliased file are used from its namespace" {

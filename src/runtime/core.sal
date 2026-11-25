@@ -50,6 +50,9 @@ trait Resolver {
     bool cancelled();
     // Not going to settle it, so the waiter gets Gone
     void drop();
+    // Before settling. Waiters with no queue of their own carry on from where, even ones that come
+    // after it's settled, rather than on whichever thread settles it or waits for it
+    void carryOn(keep Queue where);
 }
 
 // Handed to every plugin when it loads. Outlives all of them.

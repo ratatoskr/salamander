@@ -52,5 +52,7 @@ trait Counter {
     u32 each(u32 n, Visit visit);
     async u32 later(u32 n);
     async u32!Fail laterCheck(u32 n);
+    // Settles once the test says, with n + 1
+    async u32 soon(u32 n);
     void bump(inout Vec3 v);
 }

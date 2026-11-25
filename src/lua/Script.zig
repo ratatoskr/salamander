@@ -70,6 +70,7 @@ pub fn create(options: engine.Options) !engine.Script {
     self.binder = Binder.init(gpa, l, .{ .host = host, .queue = self.queue, .report = binderReport }) catch return error.OutOfMemory;
     self.binder.user = self;
     self.binder.core.policy = options.policy;
+    self.binder.core.resume_on = options.resume_on;
     self.binder.core.schema_options = options.schema_options;
     self.binder.core.locator = options.locator;
     self.binder.pushTask(l);
@@ -182,6 +183,16 @@ pub fn module(self: *Script, name: []const u8, exports: []const engine.Export) e
     try self.natives.add(self.gpa, name, exports);
 }
 
+pub fn globals(self: *Script, roots: []const engine.Export) engine.Error!void {
+    self.binder.core.enter();
+    defer self.binder.core.leave();
+    const l = self.l;
+    var buf: [128]u8 = undefined;
+    const clash = self.binder.schemaGlobals(l, &buf) catch |err| return self.failed(err);
+    if (clash) |n| return self.failedWith("the namespace {s} would hide Lua's own {s}", .{ n, n });
+    for (roots) |r| self.binder.exposeRoot(l, r.schema, r.trait, r.obj) catch |err| return self.failed(err);
+}
+
 /// The task promise on top's state. Lets go of the marker `run` puts on it.
 fn taskState(l: *State) []const u8 {
     const p = lua.top(l);
@@ -212,7 +223,7 @@ pub fn run(self: *Script, source: []const u8, name: []const u8) engine.Error!voi
     // Something waits on it while it runs, so failing settles it rather than being reported
     lua.newTable(l);
     lua.rawSet(l, p, "waiters");
-    self.pumpJobs();
+    self.pumpJobs(self.queue);
     const state = taskState(l);
     if (std.mem.eql(u8, state, "rejected")) {
         _ = lua.rawGet(l, p, "value");
@@ -257,7 +268,7 @@ pub fn eval(self: *Script, source: []const u8, buf: []u8) engine.Evaluated {
     const p = lua.top(l);
     lua.newTable(l);
     lua.rawSet(l, p, "waiters");
-    self.pumpJobs();
+    self.pumpJobs(self.queue);
     const state = taskState(l);
     if (std.mem.eql(u8, state, "pending")) return .{ .value = "(running)" };
     _ = lua.rawGet(l, p, "value");
@@ -308,15 +319,24 @@ pub fn pump(self: *Script) void {
     self.binder.core.enter();
     defer self.binder.core.leave();
     defer self.interrupted.store(false, .monotonic);
-    self.pumpJobs();
+    self.pumpJobs(self.queue);
 }
 
-fn pumpJobs(self: *Script) void {
+fn pumpJobs(self: *Script, queue: rt.Queue) void {
     for (0..64) |_| {
-        if (self.queue.poll() == 0) break;
+        if (queue.poll() == 0) break;
         self.binder.runJobs();
     }
     self.binder.runJobs();
+}
+
+/// Like `pump`, from another queue that `resume_on` posts to, on this thread.
+pub fn pumpQueue(self: *Script, queue: rt.Queue, wait: bool) bool {
+    if (wait) self.binder.core.enter() else if (!self.binder.core.tryEnter()) return false;
+    defer self.binder.core.leave();
+    defer self.interrupted.store(false, .monotonic);
+    self.pumpJobs(queue);
+    return true;
 }
 
 pub fn interrupt(self: *Script) void {

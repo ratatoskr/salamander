@@ -294,6 +294,12 @@ pub const ZigOptions = struct {
     target: std.Build.ResolvedTarget,
     /// Tools' namespaces in scope in every file, like `&.{"wraith"}` so they can say `[Sig]`.
     uses: []const []const u8 = &.{},
+    /// Namespaces every file uses the types of by their short names, like `&.{"Wraith"}`.
+    global_uses: []const []const u8 = &.{},
+    /// Where files that don't say a namespace go, like a plugin's own. Empty is the top.
+    namespace: []const u8 = "",
+    /// Files whose names start with a prefix go in its namespace instead, like `freecam/=Freecam`.
+    file_namespaces: []const []const u8 = &.{},
     /// Other folders of `.sal` files in the same schema, each named, like a dependency's.
     with: []const With = &.{},
     /// Tags that make a struct a global, like `wraith.Instance=Sig`. See the parser's `InstanceTag`.
@@ -371,6 +377,9 @@ fn generate(b: *std.Build, gen: *std.Build.Step.Compile, runtime: *std.Build.Mod
     } else run.addFileArg(options.source.?);
     run.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{options.target.result.ptrBitWidth() / 8}) });
     for (options.uses) |u| run.addArgs(&.{ "--use", u });
+    for (options.global_uses) |u| run.addArgs(&.{ "--global-use", u });
+    if (options.namespace.len > 0) run.addArgs(&.{ "--default-namespace", options.namespace });
+    for (options.file_namespaces) |f| run.addArgs(&.{ "--file-namespace", f });
     for (options.instances) |i| run.addArgs(&.{ "--instance", i });
     for (options.with) |w| {
         run.addArgs(&.{ "--with", w.name });

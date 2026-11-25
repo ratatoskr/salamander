@@ -11,7 +11,7 @@ Pre-release. Expect breaking changes.
 ## Features
 
 - `.sal` schemas: structs, enums, bitfields, errors, and traits with plain, async and failing methods.
-- Namespaces, and generic structs that make a struct for each set of types they're used with.
+- Namespaces, and generic structs that make a struct for each set of types they're used with. Names are looked up like C#'s: what's nested in the type they're in, then their own namespace and each one around it, then `use`s, with the closer one winning. Files that don't say their namespace can get one from the tool, like a plugin's name.
 - Generates Zig, with plain types and their wire forms, and C headers.
 - Generates C# that's the same JIT'd or compiled with NativeAOT. A raw layer of blittable structs and `delegate* unmanaged` tables, and plain C# over it: namespaces, strings, spans, exceptions for errors, tasks for async methods, delegates for callbacks, and interfaces to implement traits with.
 - TypeScript and LuaLS typings for scripts' editors.

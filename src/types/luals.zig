@@ -1,5 +1,7 @@
-//! LuaLS annotations. `api` for a module of traits and plain types, `schema` for the live module,
-//! `builtins` for `salamander`. Classes are global in LuaLS, so live ones are `schema.Name`.
+//! LuaLS annotations. `globals` declares what schemas give scripts, with each namespace at the top a
+//! global, and `builtins` declares `salamander`. Types are classes by their whole names, like
+//! `World.Counter`. What a namespace holds while scripts run is a class too, like `World`, or
+//! `World.CounterClass` for a struct's class, an enum's values or a trait's `instance()`.
 
 const std = @import("std");
 const Schema = @import("salamander_schema").Schema;
@@ -9,138 +11,149 @@ const types = @import("root.zig");
 const Writer = std.Io.Writer;
 const Error = Writer.Error;
 const Ref = Schema.Ref;
+const Entry = types.Entry;
 
 const header = "-- Made from .sal files by Salamander. Don't change it, since it's made again.\n\n";
 
 const Use = enum { out, in, view, field };
 
-/// Set while writing the `schema` module, whose enums and records are all `schema.Name`.
-threadlocal var live = false;
+/// Everything in `s`, for a `---@meta` file. Each namespace at the top is a global table, like
+/// `World`, with struct classes, enum values, functions, statics, roots' accessors like
+/// `Wraith.tweaks()`, and `instance()` on the traits those give and on the roots. `singletons` are
+/// whole trait names the host gives one of on their own, like `Freecam.Camera`, which scripts get
+/// from `Freecam.camera()` and `Freecam.Camera.instance()`.
+pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8) Error!void {
+    types.singletons = singletons;
+    defer types.singletons = &.{};
+    const live: types.Live = .init(s);
+    try w.writeAll("---@meta\n" ++ header);
+    var all: types.Entries = .{ .s = s };
+    while (all.next()) |e| if (e.isType()) try declareType(w, s, source, &live, e);
+    all = .{ .s = s };
+    while (all.next()) |e| if (e.holds(s)) try table(w, s, source, fullName(e));
+    try namespaceTables(w, s, source, "");
 
-/// `api.module` declaring the schema's traits and types, and `api.root`'s exports.
-pub fn api(w: *Writer, s: Schema, source: []const u8, options: types.Api) Error!void {
-    try w.print("---@meta {s}\n" ++ header, .{options.module});
-    for (s.types) |*t| try apiType(w, s, source, t);
-    for (s.traits) |*t| try trait(w, s, source, t);
-    const root = if (options.root) |r| s.findTrait(r) else null;
-    try w.print("---@class {s}\n", .{options.module});
-    if (root) |t| for (t.methods) |m| {
-        try doc(w, source, m.at);
-        try w.print("---@field {s} ", .{m.name});
-        try typeRef(w, s, m.signature.ret, .out);
-        try w.writeByte('\n');
+    all = .{ .s = s };
+    while (all.next()) |e| if (e.parent.len == 0 and e.isValue(s)) switch (e.what) {
+        .function, .accessor => |m| try function(w, s, source, m.*, "", e.leaf),
+        .singleton => |t| try singleton(w, t, ""),
+        .type, .trait => try global(w, s, e.leaf),
+        .static => {},
     };
-    try w.writeAll("local module = {}\nreturn module\n");
+    var tops: types.Children = .init(s, "", .value);
+    while (tops.next()) |ns| if (types.holder(s, ns) == null) try global(w, s, ns);
 }
 
-/// The exports as globals, for consoles. A file of its own, since a module's file has to return it.
-pub fn globals(w: *Writer, s: Schema, source: []const u8, options: types.Api) Error!void {
-    try w.writeAll("---@meta\n" ++ header);
-    const root = s.findTrait(options.root orelse return) orelse return;
-    for (root.methods) |m| {
-        try doc(w, source, m.at);
-        try w.writeAll("---@type ");
-        try typeRef(w, s, m.signature.ret, .out);
-        try w.print("\n{s} = nil\n\n", .{m.name});
+/// The function giving a singleton of `t` on the table `on`, or a global for "".
+fn singleton(w: *Writer, t: *const Schema.Trait, on: []const u8) Error!void {
+    var buf: [128]u8 = undefined;
+    const name = types.singletonName(&buf, t.name);
+    try w.writeAll("---The one scripts are given.\n---@return ");
+    try types.writeTypeName(w, t.name);
+    if (on.len == 0) {
+        try w.print("\nfunction {s}() end\n\n", .{name});
+    } else if (keywords.has(name)) {
+        try w.print("\n{s}[\"{s}\"] = function() end\n\n", .{ on, name });
+    } else try w.print("\nfunction {s}.{s}() end\n\n", .{ on, name });
+}
+
+fn fullName(e: Entry) []const u8 {
+    return switch (e.what) {
+        .type => |t| t.name,
+        .trait, .singleton => |t| t.name,
+        .function => |f| f.name,
+        .static => |v| v.name,
+        .accessor => |m| m.name,
+    };
+}
+
+fn global(w: *Writer, s: Schema, name: []const u8) Error!void {
+    try w.writeAll("---@type ");
+    try tableName(w, s, name);
+    try w.print("\n{s} = {{}}\n\n", .{name});
+}
+
+/// A table class for each namespace in `path` that isn't a struct's, enum's or trait's, however deep.
+fn namespaceTables(w: *Writer, s: Schema, source: []const u8, path: []const u8) Error!void {
+    var inner: types.Children = .init(s, path, .value);
+    while (inner.next()) |ns| {
+        if (types.holder(s, ns) == null) try table(w, s, source, ns);
+        try namespaceTables(w, s, source, ns);
     }
 }
 
-/// The `schema` module. A live class per struct with its methods and statics, enum values, and the
-/// schema's functions and statics.
-pub fn schema(w: *Writer, s: Schema, source: []const u8) Error!void {
-    live = true;
-    defer live = false;
-    try w.writeAll("---@meta schema\n" ++ header);
-    for (s.types) |*t| switch (t.kind) {
-        .@"struct", .@"union" => try viewClass(w, s, source, t),
-        .@"enum" => |e| {
-            try doc(w, source, t.at);
-            try w.writeAll("---@class schema.");
-            try types.writeTypeName(w, t.name);
+/// The class of what's at `path` while scripts run, like `World.CounterClass`, or `World` for a
+/// namespace that's only one.
+fn tableName(w: *Writer, s: Schema, path: []const u8) Error!void {
+    try types.writeTypeName(w, path);
+    if (s.findType(path) != null or s.findTrait(path) != null) try w.writeAll("Class");
+}
+
+/// The table at `path`: what a struct's class, an enum or a trait has itself, then what's in its
+/// namespace.
+fn table(w: *Writer, s: Schema, source: []const u8, path: []const u8) Error!void {
+    const h = types.holder(s, path);
+    try w.writeAll("do\n---@class ");
+    try tableName(w, s, path);
+    try w.writeByte('\n');
+    if (h) |e| if (e.what == .type) switch (e.what.type.kind) {
+        .@"struct" => |st| for (st.statics) |v| {
+            try doc(w, source, v.at);
+            try w.print("---@field {s} ", .{v.name});
+            try typeRef(w, s, v.type, .view);
             try w.writeByte('\n');
-            for (e.values) |v| {
-                try doc(w, source, v.at);
-                try w.print("---@field {s} integer\n", .{v.name});
-            }
-            try enumNames(w, "schema.", t.name, e);
         },
-        .bitfield => |bf| {
-            try doc(w, source, t.at);
-            try w.writeAll("---@class schema.");
-            try types.writeTypeName(w, t.name);
-            try w.writeByte('\n');
-            for (bf.members) |m| {
-                try doc(w, source, m.at);
-                try w.print("---@field {s} {s}\n", .{ m.name, if (m.type == .bool) "boolean" else "integer" });
-            }
-            try w.writeByte('\n');
+        .@"enum" => |en| for (en.values) |v| {
+            try doc(w, source, v.at);
+            try w.print("---@field {s} integer\n", .{v.name});
         },
         else => {},
     };
-
-    try w.writeAll("---@class schema\n");
-    for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested and Schema.namespaceEnd(t.name) == null) {
-        try w.print("---@field {s} schema.", .{t.name});
-        try types.writeTypeName(w, t.name);
-        if (t.kind == .@"struct") try w.writeAll("Class");
-        try w.writeByte('\n');
-    };
-    var roots: types.Namespaces = .init(s);
-    while (roots.next()) |ns| if (std.mem.indexOfScalar(u8, ns, '.') == null) try w.print("---@field {s} schema.ns.{s}\n", .{ ns, ns });
-    for (s.statics) |v| if (Schema.namespaceEnd(v.name) == null) {
-        try doc(w, source, v.at);
-        try w.print("---@field {s} ", .{v.name});
-        try typeRef(w, s, v.type, .view);
-        try w.writeByte('\n');
-    };
-    try w.writeAll("local schema = {}\n\n");
-    for (s.functions) |f| if (Schema.namespaceEnd(f.name) == null) try function(w, s, source, f);
-    var namespaces: types.Namespaces = .init(s);
-    while (namespaces.next()) |ns| try namespaceClass(w, s, source, ns);
-    try w.writeAll("return schema\n");
-}
-
-/// A namespace's class, with what's in it and the namespaces in it.
-fn namespaceClass(w: *Writer, s: Schema, source: []const u8, ns: []const u8) Error!void {
-    try w.print("---@class schema.ns.{s}\n", .{ns});
-    var inner: types.Namespaces = .init(s);
-    while (inner.next()) |sub| if (Schema.namespaceEnd(sub)) |end| if (std.mem.eql(u8, sub[0..end], ns))
-        try w.print("---@field {s} schema.ns.{s}\n", .{ sub[end + 1 ..], sub });
-    try memberFields(w, s, source, ns);
-    try w.writeAll("do\nlocal c = {}\n\n");
-    var members: types.Members = .{ .s = s };
-    while (members.next()) |m| if (std.mem.eql(u8, m.parent(), ns)) switch (m.what) {
-        .function => |f| {
-            try methodDocs(w, s, source, f.*, null);
-            if (keywords.has(m.leaf())) {
-                try w.print("c[\"{s}\"] = function(", .{m.leaf()});
-            } else try w.print("function c.{s}(", .{m.leaf()});
-            try paramNames(w, f.signature);
-            try w.writeAll(") end\n\n");
-        },
-        else => {},
-    };
-    try w.writeAll("end\n\n");
-}
-
-/// Fields for the structs, enums and statics in `ns`, a namespace or a struct's class.
-fn memberFields(w: *Writer, s: Schema, source: []const u8, ns: []const u8) Error!void {
-    var members: types.Members = .{ .s = s };
-    while (members.next()) |m| if (std.mem.eql(u8, m.parent(), ns)) switch (m.what) {
-        .type => |t| {
-            try w.print("---@field {s} schema.", .{m.leaf()});
-            try types.writeTypeName(w, t.name);
-            if (t.kind == .@"struct") try w.writeAll("Class");
+    var all: types.Entries = .{ .s = s };
+    while (all.next()) |e| if (e.isValue(s) and std.mem.eql(u8, e.parent, path)) switch (e.what) {
+        .type, .trait => {
+            try w.print("---@field {s} ", .{e.leaf});
+            try tableName(w, s, fullName(e));
             try w.writeByte('\n');
         },
         .static => |v| {
             try doc(w, source, v.at);
-            try w.print("---@field {s} ", .{m.leaf()});
+            try w.print("---@field {s} ", .{e.leaf});
             try typeRef(w, s, v.type, .view);
             try w.writeByte('\n');
         },
-        .function => {},
+        .function, .accessor, .singleton => {},
     };
+    var inner: types.Children = .init(s, path, .value);
+    while (inner.next()) |ns| if (types.holder(s, ns) == null) {
+        try w.print("---@field {s} ", .{types.leafOf(ns)});
+        try tableName(w, s, ns);
+        try w.writeByte('\n');
+    };
+    try w.writeAll("local c = {}\n\n");
+    if (h) |e| switch (e.what) {
+        .type => |t| if (t.kind == .@"struct") {
+            if (s.findFunction(nameDot(t.name, "at")) == null) {
+                try w.writeAll("---A live view of one at `address`. Nil at 0.\n---@param address integer\n---@return ");
+                try types.writeTypeName(w, t.name);
+                try w.writeAll("|nil\nfunction c.at(address) end\n\n");
+            }
+            for (t.kind.@"struct".methods) |m| try methodOn(w, s, source, m, "c", false, if (m.static) null else t.name);
+        },
+        .trait => {
+            try w.writeAll("---The one scripts are given.\n---@return ");
+            try types.writeTypeName(w, path);
+            try w.writeAll("\nfunction c.instance() end\n\n");
+        },
+        else => {},
+    };
+    all = .{ .s = s };
+    while (all.next()) |e| if (e.isValue(s) and std.mem.eql(u8, e.parent, path)) switch (e.what) {
+        .function, .accessor => |m| try function(w, s, source, m.*, "c", e.leaf),
+        .singleton => |t| try singleton(w, t, "c"),
+        else => {},
+    };
+    try w.writeAll("end\n\n");
 }
 
 /// `salamander`, as the module and a global.
@@ -208,7 +221,7 @@ pub fn builtins(w: *Writer) Error!void {
         \\---@param f fun(copy: T)
         \\function salamander.edit(view, f) end
         \\
-        \\---A `.sal` written while running, in place of what was loaded as `name` before. Gives what it declares, like the `schema` module.
+        \\---A `.sal` written while running, in place of what was loaded as `name` before. Gives what it declares, like the globals have.
         \\---@param name string
         \\---@param text string
         \\---@return table
@@ -221,9 +234,22 @@ pub fn builtins(w: *Writer) Error!void {
 
 // Declarations
 
-fn apiType(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type) Error!void {
+/// A type, by its whole name. Structs in memory have live views for fields, and the rest are plain
+/// values whose fields go both ways.
+fn declareType(w: *Writer, s: Schema, source: []const u8, live: *const types.Live, e: Entry) Error!void {
+    const t = switch (e.what) {
+        .trait => |t| return trait(w, s, source, t),
+        .type => |t| t,
+        else => return,
+    };
     switch (t.kind) {
         .@"struct", .@"union" => |st| {
+            const is_live = live.has(s, t);
+            const methods = for (st.methods) |m| {
+                if (!m.static) break true;
+            } else false;
+            // In a block of its own, so the class is the local that has its methods
+            if (methods) try w.writeAll("do\n");
             try doc(w, source, t.at);
             try w.writeAll("---@class ");
             try types.writeTypeName(w, t.name);
@@ -234,31 +260,44 @@ fn apiType(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type) Err
             try w.writeByte('\n');
             for (st.fields) |f| {
                 try doc(w, source, f.at);
-                try w.print("---@field {s}{s} ", .{ f.name, if (t.kind == .@"union") "?" else "" });
-                try typeRef(w, s, f.type, .field);
+                try w.print("---@field {s}{s} ", .{ f.name, if (t.kind == .@"union" and !is_live) "?" else "" });
+                try typeRef(w, s, f.type, if (is_live) .view else .field);
                 try w.writeByte('\n');
             }
-            try w.writeByte('\n');
+            if (!methods) return w.writeByte('\n');
+            try w.writeAll("local c = {}\n\n");
+            for (st.methods) |m| if (!m.static) try methodOn(w, s, source, m, "c", true, null);
+            try w.writeAll("end\n\n");
         },
-        .@"enum" => |e| {
+        .@"enum" => |en| {
             try doc(w, source, t.at);
             try w.writeAll("---@alias ");
             try types.writeTypeName(w, t.name);
             try w.writeAll(" integer\n");
-            try enumNames(w, "", t.name, e);
-        },
-        .bitfield => {
-            try doc(w, source, t.at);
-            try w.writeAll("---@alias ");
+            try w.print("---What `{s}` can also be given as.\n---@alias ", .{e.leaf});
             try types.writeTypeName(w, t.name);
-            try w.writeAll(" integer\n\n");
+            try w.writeAll("Name");
+            if (en.values.len == 0) try w.writeAll(" string");
+            for (en.values, 0..) |v, i| try w.print("{s}\"{s}\"", .{ if (i == 0) " " else "|", v.name });
+            try w.writeAll("\n\n");
+        },
+        .bitfield => |bf| {
+            try doc(w, source, t.at);
+            try w.writeAll("---@class ");
+            try types.writeTypeName(w, t.name);
+            try w.writeByte('\n');
+            for (bf.members) |m| {
+                try doc(w, source, m.at);
+                try w.print("---@field {s} {s}\n", .{ m.name, if (m.type == .bool) "boolean" else "integer" });
+            }
+            try w.writeByte('\n');
         },
         .@"error" => |es| {
             try doc(w, source, t.at);
             try w.writeAll("---What it can raise, by name.\n---@alias ");
             try types.writeTypeName(w, t.name);
-            for (es.errors, 0..) |e, i| try w.print("{s}\"{s}\"", .{ if (i == 0) " " else "|", e.name });
-            for (Schema.builtin_errors) |e| try w.print("|\"{s}\"", .{e});
+            for (es.errors, 0..) |x, i| try w.print("{s}\"{s}\"", .{ if (i == 0) " " else "|", x.name });
+            for (Schema.builtin_errors) |x| try w.print("|\"{s}\"", .{x});
             try w.writeAll("\n\n");
         },
         .@"opaque" => {},
@@ -273,17 +312,9 @@ fn apiType(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type) Err
     }
 }
 
-fn enumNames(w: *Writer, prefix: []const u8, name: []const u8, e: Schema.Enum) Error!void {
-    try w.print("---What `{s}` can also be given as.\n---@alias {s}", .{ name, prefix });
-    try types.writeTypeName(w, name);
-    try w.writeAll("Name");
-    if (e.values.len == 0) try w.writeAll(" string");
-    for (e.values, 0..) |v, i| try w.print("{s}\"{s}\"", .{ if (i == 0) " " else "|", v.name });
-    try w.writeAll("\n\n");
-}
-
-/// A trait's class, by its own name, with its methods.
-pub fn trait(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Trait) Error!void {
+/// A trait's class, by its whole name, with its methods.
+fn trait(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Trait) Error!void {
+    try w.writeAll("do\n");
     try doc(w, source, t.at);
     try w.writeAll("---@class ");
     try types.writeTypeName(w, t.name);
@@ -291,61 +322,19 @@ pub fn trait(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Trait) 
         try w.writeAll(if (i == 0) " : " else ", ");
         try types.writeTypeName(w, b);
     }
-    try w.writeAll("\ndo\nlocal c = {}\n\n");
+    try w.writeAll("\nlocal c = {}\n\n");
     for (t.methods) |m| try methodOn(w, s, source, m, "c", true, null);
     try w.writeAll("end\n\n");
 }
 
-/// A struct in memory. `schema.Name` for its views, `schema.NameClass` with `at`, methods and statics.
-fn viewClass(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type) Error!void {
-    const st = switch (t.kind) {
-        .@"struct", .@"union" => |st| st,
-        else => unreachable,
-    };
-    try doc(w, source, t.at);
-    try w.writeAll("---@class schema.");
-    try types.writeTypeName(w, t.name);
-    if (st.base) |b| {
-        try w.writeAll(" : schema.");
-        try types.writeTypeName(w, b);
-    }
-    try w.writeByte('\n');
-    for (st.fields) |f| {
-        try doc(w, source, f.at);
-        try w.print("---@field {s} ", .{f.name});
-        try typeRef(w, s, f.type, .view);
-        try w.writeByte('\n');
-    }
-    try w.writeAll("do\nlocal c = {}\n\n");
-    for (st.methods) |m| if (!m.static) try methodOn(w, s, source, m, "c", true, null);
-    try w.writeAll("end\n\n");
-    if (t.nested) return;
-
-    try w.writeAll("---@class schema.");
-    try types.writeTypeName(w, t.name);
-    try w.writeAll("Class\n");
-    for (st.statics) |v| {
-        try doc(w, source, v.at);
-        try w.print("---@field {s} ", .{v.name});
-        try typeRef(w, s, v.type, .view);
-        try w.writeByte('\n');
-    }
-    try memberFields(w, s, source, t.name);
-    try w.writeAll("do\nlocal c = {}\n\n");
-    if (s.findFunction(nameDot(t.name, "at")) == null) {
-        try w.writeAll("---A live view of one at `address`. Nil at 0.\n---@param address integer\n---@return schema.");
-        try types.writeTypeName(w, t.name);
-        try w.writeAll("|nil\nfunction c.at(address) end\n\n");
-    }
-    for (st.methods) |m| try methodOn(w, s, source, m, "c", false, if (m.static) null else t.name);
-    try w.writeAll("end\n\n");
-}
-
-fn function(w: *Writer, s: Schema, source: []const u8, f: Schema.Method) Error!void {
+/// A function on the table `on`, called with a dot, or a global for "".
+fn function(w: *Writer, s: Schema, source: []const u8, f: Schema.Method, on: []const u8, name: []const u8) Error!void {
     try methodDocs(w, s, source, f, null);
-    if (keywords.has(f.name)) {
-        try w.print("schema[\"{s}\"] = function(", .{f.name});
-    } else try w.print("function schema.{s}(", .{f.name});
+    if (on.len == 0) {
+        try w.print("function {s}(", .{name});
+    } else if (keywords.has(name)) {
+        try w.print("{s}[\"{s}\"] = function(", .{ on, name });
+    } else try w.print("function {s}.{s}(", .{ on, name });
     try paramNames(w, f.signature);
     try w.writeAll(") end\n\n");
 }
@@ -376,7 +365,7 @@ fn methodDocs(w: *Writer, s: Schema, source: []const u8, m: Schema.Method, this_
         else => {},
     }
     if (this_type) |t| {
-        try w.writeAll("---@param self schema.");
+        try w.writeAll("---@param self ");
         try types.writeTypeName(w, t);
         try w.writeByte('\n');
     }
@@ -457,24 +446,14 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
             const t = s.findType(n) orelse return w.writeAll("any");
             switch (t.kind) {
                 .@"enum" => {
-                    if (use != .in and use != .field) return if (live) w.writeAll("integer") else types.writeTypeName(w, n);
-                    try w.writeAll(if (live) "integer|schema." else "");
-                    if (!live) {
-                        try types.writeTypeName(w, n);
-                        try w.writeAll("|");
-                    }
+                    try types.writeTypeName(w, n);
+                    if (use != .in and use != .field) return;
+                    try w.writeByte('|');
                     try types.writeTypeName(w, n);
                     try w.writeAll("Name");
                 },
-                .bitfield => if (use == .view) {
-                    try w.writeAll("schema.");
-                    try types.writeTypeName(w, n);
-                } else try w.writeAll("integer"),
+                .bitfield => if (use == .view) try types.writeTypeName(w, n) else try w.writeAll("integer"),
                 .@"opaque" => try w.writeAll("integer"),
-                .@"struct", .@"union" => {
-                    if (use == .view or live) try w.writeAll("schema.");
-                    try types.writeTypeName(w, n);
-                },
                 else => try types.writeTypeName(w, n),
             }
         },
@@ -482,7 +461,6 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
             if (types.isTextPointer(r)) return w.writeAll(if (use == .in) "integer" else "string|nil");
             if (types.isRecord(s, child.*)) {
                 if (use == .in) try w.writeAll("integer|");
-                try w.writeAll("schema.");
                 try types.writeTypeName(w, child.named);
                 return w.writeAll("|nil");
             }
@@ -533,12 +511,26 @@ fn paramName(w: *Writer, name: []const u8) Error!void {
 
 const testing = std.testing;
 
-test "a module's traits, types and exports" {
+/// Fails showing `text` if a piece of `want` isn't in it.
+fn expectPieces(text: []const u8, want: []const []const u8) !void {
+    for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+fn generate(source: []const u8, options: @import("salamander_schema").Options, singletons: []const []const u8, out: *Writer.Allocating) !void {
+    var parsed = try @import("salamander_schema").parse(testing.allocator, source, options, null);
+    defer parsed.deinit();
+    try globals(&out.writer, parsed.schema, source, singletons);
+}
+
+test "traits, plain types and docs, with a root at the top" {
     const source =
         \\error Shy { Early = 1 }
         \\enum Mode : u8 { off, on }
         \\// A greeting
-        \\struct Greeting { u32 times; u8[8] name; u64 big; }
+        \\struct Greeting { u32 times; u8[8] name; u64 big; Mode mode; }
         \\fn void Tick(u32 n);
         \\trait Greeter {
         \\    // Says hi
@@ -547,77 +539,68 @@ test "a module's traits, types and exports" {
         \\    ?u32 maybe();
         \\    void end();
         \\}
-        \\trait Root { Greeter greeter(); }
+        \\[Root] trait App {
+        \\    // The greeter
+        \\    Greeter greeter();
+        \\    u32 version();
+        \\}
     ;
-    var parsed = try @import("salamander_schema").parse(testing.allocator, source, .{}, null);
-    defer parsed.deinit();
     var out: Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try api(&out.writer, parsed.schema, source, .{ .module = "app", .root = "Root" });
-    try globals(&out.writer, parsed.schema, source, .{ .module = "app", .root = "Root" });
-    const text = out.written();
-    const want = [_][]const u8{
-        "---@meta app",
+    try generate(source, .{}, &.{}, &out);
+    try expectPieces(out.written(), &.{
+        "---@meta\n",
         "---@alias Mode integer",
         "---@alias ModeName \"off\"|\"on\"",
         "---A greeting\n---@class Greeting\n",
         "---@field name string",
         "---@field big integer",
+        "---@field mode Mode|ModeName",
         "---@return integer|nil\nfunction c:maybe() end",
         "---@alias Tick fun(n: integer)",
         "---Says hi\n---Raises `Shy` if it fails.\n---@param mode Mode|ModeName\n---@param count { value: integer }\n---@param in_ Greeting\n---@return Greeting\nfunction c:greet(mode, count, in_) end",
         "---@return salamander.Promise\nfunction c:later(tick) end",
         "c[\"end\"] = function(self) end",
-        "---@class app\n---@field greeter Greeter\nlocal module = {}\nreturn module",
-        "---@type Greeter\ngreeter = nil",
-    };
-    for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
-        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });
-        return error.TestUnexpectedResult;
-    };
+        "do\n---@class GreeterClass\nlocal c = {}\n\n---The one scripts are given.\n---@return Greeter\nfunction c.instance() end",
+        "---@class ModeClass\n---@field off integer",
+        "---The greeter\n---@return Greeter\nfunction greeter() end",
+        "---@type GreeterClass\nGreeter = {}",
+        "---@type AppClass\nApp = {}",
+    });
 }
 
-test "the schema module's live classes" {
+test "structs in memory have live classes" {
     const source =
         \\enum Mode : u8 { off, on }
         \\struct Base { u32 id; }
         \\struct Player : Base {
         \\    u32 health;
         \\    u8 flags { u8 speed : 3; bool paused; }
+        \\    Mode mode;
         \\    Player* next;
         \\    [Virtual(2)] f32 heal(u32 amount);
         \\    [game.Sig("48")] static Player* create();
         \\    [game.Sig("48")] static Player* instance;
         \\}
         \\[game.Sig("48")] u32 spawn(Mode mode);
-        \\[game.Sig("48")] static u32 frames;
     ;
-    var parsed = try @import("salamander_schema").parse(testing.allocator, source, .{ .any_namespace = true }, null);
-    defer parsed.deinit();
     var out: Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try schema(&out.writer, parsed.schema, source);
-    const text = out.written();
-    const want = [_][]const u8{
-        "---@class schema.Player : schema.Base\n---@field health integer\n---@field flags schema.Player_flags\n---@field next schema.Player|nil\n",
+    try generate(source, .{ .any_namespace = true }, &.{}, &out);
+    try expectPieces(out.written(), &.{
+        "do\n---@class Player : Base\n---@field health integer\n---@field flags Player.flags\n---@field mode Mode\n---@field next Player|nil\nlocal c = {}\n",
         "---@param amount integer\n---@return number\nfunction c:heal(amount) end",
-        "---@class schema.PlayerClass\n---@field instance schema.Player|nil\n",
-        "---@return schema.Player|nil\nfunction c.at(address) end",
-        "---@param self schema.Player\n---@param amount integer\n---@return number\nfunction c.heal(self, amount) end",
+        "---@class PlayerClass\n---@field instance Player|nil\n",
+        "---@return Player|nil\nfunction c.at(address) end",
+        "---@param self Player\n---@param amount integer\n---@return number\nfunction c.heal(self, amount) end",
         "function c.create() end",
-        "---@class schema.Player_flags\n---@field speed integer\n---@field paused boolean",
-        "---@class schema.Mode\n---@field off integer",
-        "---@field Player schema.PlayerClass",
-        "---@field frames integer",
-        "---@param mode integer|schema.ModeName\n---@return integer\nfunction schema.spawn(mode) end",
-    };
-    for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
-        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });
-        return error.TestUnexpectedResult;
-    };
+        "---@class Player.flags\n---@field speed integer\n---@field paused boolean",
+        "---@param mode Mode|ModeName\n---@return integer\nfunction spawn(mode) end",
+        "---@type PlayerClass\nPlayer = {}",
+    });
 }
 
-test "the schema module's namespaces" {
+test "namespaces are globals, with a root's accessors and names in a trait's namespace" {
     const source =
         \\namespace World {
         \\    struct Counter { u32 n; Counter* next; [game.Sig("48")] static Counter* main; }
@@ -625,22 +608,53 @@ test "the schema module's namespaces" {
         \\    [game.Sig("48")] u32 twice(u32 n);
         \\    [game.Sig("48")] static u32 ticks;
         \\}
+        \\namespace Wraith {
+        \\    trait Tweaks { void add(Definition d); Mode mode(); }
+        \\    namespace Tweaks {
+        \\        enum Mode : u8 { off, toggle }
+        \\        struct Definition { u8[16] id; Mode mode; }
+        \\    }
+        \\    trait Vfs { void close(); }
+        \\    [Root] trait Api { Tweaks tweaks(); u32 version(); }
+        \\}
     ;
-    var parsed = try @import("salamander_schema").parse(testing.allocator, source, .{ .any_namespace = true }, null);
-    defer parsed.deinit();
     var out: Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try schema(&out.writer, parsed.schema, source);
+    try generate(source, .{ .any_namespace = true }, &.{}, &out);
     const text = out.written();
-    const want = [_][]const u8{
-        "---@class schema.World_Counter\n",
-        "---@field World schema.ns.World\n",
-        "---@class schema.ns.World\n---@field Inner schema.ns.World.Inner\n---@field Counter schema.World_CounterClass\n---@field ticks integer\n",
-        "function c.twice(n) end",
-        "---@class schema.ns.World.Inner\n---@field Mode schema.World_Inner_Mode\n",
-    };
-    for (want) |piece| if (std.mem.indexOf(u8, text, piece) == null) {
-        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ piece, text });
-        return error.TestUnexpectedResult;
-    };
+    try expectPieces(text, &.{
+        "---@class World.Counter\n---@field n integer\n---@field next World.Counter|nil\n",
+        "---@class World.CounterClass\n---@field main World.Counter|nil\n",
+        "do\n---@class World\n---@field Counter World.CounterClass\n---@field ticks integer\n---@field Inner World.Inner\nlocal c = {}\n\n---@param n integer\n---@return integer\nfunction c.twice(n) end",
+        "---@class World.Inner\n---@field Mode World.Inner.ModeClass\n",
+        "---@alias Wraith.Tweaks.Mode integer",
+        "---@class Wraith.Tweaks.Definition\n---@field id string\n---@field mode Wraith.Tweaks.Mode|Wraith.Tweaks.ModeName\n",
+        "do\n---@class Wraith.Tweaks\nlocal c = {}\n\n---@param d Wraith.Tweaks.Definition\nfunction c:add(d) end",
+        "---@class Wraith.Vfs\n",
+        "do\n---@class Wraith.TweaksClass\n---@field Mode Wraith.Tweaks.ModeClass\n---@field Definition Wraith.Tweaks.DefinitionClass\nlocal c = {}\n\n---The one scripts are given.\n---@return Wraith.Tweaks\nfunction c.instance() end",
+        "do\n---@class Wraith\n---@field Tweaks Wraith.TweaksClass\n---@field Api Wraith.ApiClass\nlocal c = {}\n\n---@return Wraith.Tweaks\nfunction c.tweaks() end",
+        "---@type World\nWorld = {}",
+        "---@type Wraith\nWraith = {}",
+    });
+    try testing.expect(std.mem.indexOf(u8, text, "Wraith.VfsClass") == null);
+}
+
+test "singletons are functions on their namespace, with instance()" {
+    const source =
+        \\namespace Freecam { [wraith.Service] trait Camera { void move(f32 x); } }
+        \\trait Pad { void rumble(); }
+        \\trait Other { void no(); }
+    ;
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try generate(source, .{ .any_namespace = true }, &.{ "Freecam.Camera", "Pad", "Missing" }, &out);
+    const text = out.written();
+    try expectPieces(text, &.{
+        "do\n---@class Freecam\n---@field Camera Freecam.CameraClass\nlocal c = {}\n\n---The one scripts are given.\n---@return Freecam.Camera\nfunction c.camera() end",
+        "do\n---@class Freecam.CameraClass\nlocal c = {}\n\n---The one scripts are given.\n---@return Freecam.Camera\nfunction c.instance() end",
+        "---The one scripts are given.\n---@return Pad\nfunction pad() end",
+        "---@type PadClass\nPad = {}",
+        "---@type Freecam\nFreecam = {}",
+    });
+    try testing.expect(std.mem.indexOf(u8, text, "OtherClass") == null);
 }

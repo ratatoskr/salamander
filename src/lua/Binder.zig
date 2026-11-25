@@ -102,6 +102,7 @@ const Await = struct {
     lua_promise: c_int,
     trait: *Trait,
     slot: usize,
+    resume_on: ?script.Resume = null,
 };
 
 pub fn init(gpa: Allocator, l: *State, options: Options) !*Binder {
@@ -771,6 +772,125 @@ fn callDeclaredC(l_: ?*State) callconv(.c) c_int {
     return b.callDeclared(l, name, 1) catch |e| b.raise(l, e);
 }
 
+// Globals: each namespace at the top, like `Wraith`, and what `[Root]` objects give
+
+/// Each namespace at the top of what's loaded, like `Wraith` and `Kai`, as a global with what's in
+/// it. Gives the name of one that would hide a global Lua has already, copied into `clash`,
+/// setting none.
+pub fn schemaGlobals(b: *Binder, l: *State, clash: []u8) Error!?[]const u8 {
+    if (c.lua_checkstack(l, 8) == 0) return error.OutOfMemory;
+    var arena: std.heap.ArenaAllocator = .init(b.core.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var names: std.ArrayList([:0]const u8) = .empty;
+    var it = b.core.declaring();
+    while (it.next()) |s| {
+        for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested) try addRoot(&names, a, t.name);
+        for (s.functions) |f| try addRoot(&names, a, f.name);
+        for (s.statics) |v| if (Schema.namespaceEnd(v.name) != null) try addRoot(&names, a, v.name);
+    }
+    for (names.items) |n| {
+        const kind = c.lua_getglobal(l, lua.cstr(n));
+        lua.pop(l, 1);
+        if (kind == c.LUA_TNIL) continue;
+        const len = @min(n.len, clash.len);
+        @memcpy(clash[0..len], n[0..len]);
+        return clash[0..len];
+    }
+    try b.pushSchema(l);
+    const all = lua.top(l);
+    for (names.items) |n| {
+        _ = lua.rawGet(l, all, n);
+        c.lua_setglobal(l, lua.cstr(n));
+    }
+    lua.pop(l, 1);
+    return null;
+}
+
+/// `Scene.Node` is under `Scene`.
+fn addRoot(out: *std.ArrayList([:0]const u8), a: std.mem.Allocator, name: []const u8) error{OutOfMemory}!void {
+    const root = name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];
+    for (out.items) |e| if (std.mem.eql(u8, e, root)) return;
+    try out.append(a, try a.dupeSentinel(u8, root, 0));
+}
+
+/// A `[Root]` object of `trait` in `m`. Each accessor, like `tweaks()`, is a function on its
+/// namespace's global, like `Wraith.tweaks()`, and each trait one gives has `instance()` the same.
+/// So does the root's own trait, giving it.
+pub fn exposeRoot(b: *Binder, l: *State, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) Error!void {
+    if (c.lua_checkstack(l, 12) == 0) return error.OutOfMemory;
+    const t = b.trait(m, trait_name) catch |e| return b.traitFailed(l, e, trait_name);
+    try b.wrap(l, t, obj);
+    const root = lua.top(l);
+    defer lua.pop(l, 1);
+    _ = c.lua_rawgeti(l, c.LUA_REGISTRYINDEX, c.LUA_RIDX_GLOBALS);
+    const g = lua.top(l);
+    defer lua.pop(l, 1);
+    const s = m.schema();
+    const decl = s.findTrait(trait_name) orelse return;
+    if (Schema.namespaceEnd(trait_name)) |end| try b.pushTableIn(l, g, trait_name[0..end]) else c.lua_pushvalue(l, g);
+    const ns = lua.top(l);
+    defer lua.pop(l, 1);
+    if (!decl.root) {
+        // Just the one, like a plugin's service: `Freecam.camera()` and `Freecam.Camera.instance()`
+        pushAccessor(l, root, "");
+        const f = lua.top(l);
+        var buf: [128]u8 = undefined;
+        c.lua_pushvalue(l, f);
+        lua.rawSet(l, ns, script.singletonName(&buf, trait_name));
+        try b.pushTableIn(l, g, trait_name);
+        const own = lua.top(l);
+        c.lua_pushvalue(l, f);
+        lua.rawSet(l, own, "instance");
+        lua.pop(l, 2);
+        return;
+    }
+    for (decl.methods) |*method| {
+        if (!s.isAccessor(method)) continue;
+        pushAccessor(l, root, method.name);
+        const f = lua.top(l);
+        c.lua_pushvalue(l, f);
+        lua.rawSet(l, ns, method.name);
+        try b.pushTableIn(l, g, method.signature.ret.named);
+        const holder = lua.top(l);
+        c.lua_pushvalue(l, f);
+        lua.rawSet(l, holder, "instance");
+        lua.pop(l, 2);
+    }
+    try b.pushTableIn(l, g, trait_name);
+    const own = lua.top(l);
+    pushAccessor(l, root, "");
+    lua.rawSet(l, own, "instance");
+    lua.pop(l, 1);
+}
+
+/// Calls `root:method()` once and gives that each time after, or `root` itself for "".
+fn pushAccessor(l: *State, root: c_int, method: []const u8) void {
+    c.lua_pushvalue(l, root);
+    lua.pushString(l, method);
+    lua.newTable(l);
+    lua.pushClosure(l, accessorC, 3);
+}
+
+fn accessorC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    const name = lua.toString(l, lua.upvalue(2)).?;
+    if (name.len == 0) {
+        c.lua_pushvalue(l, lua.upvalue(1));
+        return 1;
+    }
+    if (lua.rawGet(l, lua.upvalue(3), "value") != c.LUA_TNIL) return 1;
+    lua.pop(l, 1);
+    var buf: [128:0]u8 = undefined;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{name}, 0) catch return 0;
+    _ = c.lua_getfield(l, lua.upvalue(1), lua.cstr(z));
+    c.lua_pushvalue(l, lua.upvalue(1));
+    c.lua_callk(l, 1, 1, 0, null);
+    c.lua_pushvalue(l, -1);
+    lua.rawSet(l, lua.upvalue(3), "value");
+    return 1;
+}
+
 pub fn pushSchema(b: *Binder, l: *State) Error!void {
     if (c.lua_checkstack(l, 8) == 0) return error.OutOfMemory;
     lua.newTable(l);
@@ -1223,7 +1343,7 @@ fn awaitPromise(b: *Binder, l: *State, t: *Trait, slot: usize, any: rt.AnyObject
         gpa.destroy(a);
         return error.OutOfMemory;
     };
-    promise.then(rt.Task.init(a, settled), b.core.queue.raw());
+    b.core.thenSettled(promise, a, settled);
 }
 
 /// Back on the script's thread with a native promise settled. Tasks waiting on it run at `runJobs`.
