@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "salamander_runtime", .module = runtime },
     });
     _ = ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }});
+    _ = ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }});
     // Typings for scripts' editors
     _ = ctx.addModule("types", &.{.{ .name = "salamander_schema", .module = schema }});
     // The engines, so everything using salamander shares one of each
@@ -59,6 +60,18 @@ pub fn build(b: *std.Build) void {
         .{ .name = "salamander_bind", .module = bind },
         .{ .name = "salamander_script", .module = script },
     });
+    // .NET's CoreCLR, joined or started through hostfxr
+    const clr_imports: []const Import = &.{.{ .name = "salamander_sys", .module = sys }};
+    const clr = b.addModule("salamander_clr", .{ .root_source_file = b.path("src/clr/root.zig"), .target = target, .optimize = optimize, .imports = clr_imports });
+    // Only its tests need the probe, so using it doesn't need the dotnet SDK. They get it once the generator's there.
+    const clr_tests = ctx.module("clr", clr_imports);
+    clr_tests.addImport("salamander_runtime", runtime);
+    // dlopen and getenv
+    if (target.result.os.tag != .windows) {
+        clr.link_libc = true;
+        clr_tests.link_libc = true;
+    }
+    ctx.addTests("clr", clr_tests);
     const hosts = ctx.addModule("hosts", &.{
         .{ .name = "salamander_script", .module = script },
         .{ .name = "salamander_js", .module = js },
@@ -83,6 +96,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "salamander_schema", .module = host_schema },
                 .{ .name = "salamander_zig", .module = host_zig },
                 .{ .name = "salamander_c", .module = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
+                .{ .name = "salamander_cs", .module = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
             },
         }),
     });
@@ -106,9 +120,11 @@ pub fn build(b: *std.Build) void {
     build_test_step.dependOn(&core_check.step);
 
     // Each test's schema as generated Zig, like a project using salamander gets it
-    inline for (.{ .{ bind, "bind" }, .{ js, "js" }, .{ lua_host, "lua" }, .{ hosts, "hosts" } }) |t| {
+    inline for (.{ .{ bind, "bind" }, .{ js, "js" }, .{ lua_host, "lua" }, .{ hosts, "hosts" }, .{ clr_tests, "clr" } }) |t| {
         t[0].addImport("test_schema", generate(b, gen, runtime, .{ .source = b.path("src/" ++ t[1] ++ "/test.sal"), .target = target }));
     }
+    // And as C#, built into the probe
+    clr_tests.addImport("clr_test", clrProbe(b, csFilesWith(b, gen, .{ .source = b.path("src/clr/test.sal"), .target = target, .name = "TestSchema.cs", .namespace = "Probe.Sal" })));
 
     // The generated Zig, C and the schema have to agree on everything
     const generated = generate(b, gen, runtime, .{ .source = b.path("src/schema/test.sal"), .target = target });
@@ -128,6 +144,73 @@ pub fn build(b: *std.Build) void {
     agree.addIncludePath(cHeadersWith(b, gen, base_headers, .{ .source = b.path("src/schema/test.sal"), .target = target, .name = "test_schema.h" }));
     agree.addCSourceFile(.{ .file = b.path("src/c/test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     ctx.addTests("agree", agree);
+}
+
+/// The C# the clr tests call, built with the dotnet SDK along with the C# for their schema in
+/// `schema`. Its paths are empty without the SDK, and the tests are skipped. Only looked for when
+/// salamander's the root build, since looking means configuring again every build.
+fn clrProbe(b: *std.Build, schema: std.Build.LazyPath) *std.Build.Module {
+    const options = b.addOptions();
+    const dotnet = (if (b.isRoot()) b.findProgram(.{ .names = &.{"dotnet"} }) else null) orelse {
+        options.addOption([]const u8, "dll", "");
+        options.addOption([]const u8, "runtime_config", "");
+        return options.createModule();
+    };
+    const run = b.addSystemCommand(&.{ dotnet, "build" });
+    run.addFileArg(b.path("src/clr/test/Probe.csproj"));
+    run.addArgs(&.{ "--nologo", "-clp:ErrorsOnly;NoSummary", "-c", "Release", "-o" });
+    const out = run.addOutputDirectoryArg("probe");
+    // Keeps obj out of the source tree
+    run.addArg("--artifacts-path");
+    _ = run.addOutputDirectoryArg("artifacts");
+    run.addPrefixedDirectoryArg("-p:SalamanderDir=", schema);
+    run.addFileInput(b.path("src/clr/test/Probe.cs"));
+    run.addFileInput(b.path("src/clr/test/Traits.cs"));
+    run.setEnvironmentVariable("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
+    run.setEnvironmentVariable("DOTNET_NOLOGO", "1");
+    options.addOptionPath("dll", out.path(b, "Probe.dll"));
+    options.addOptionPath("runtime_config", out.path(b, "Probe.runtimeconfig.json"));
+    return options.createModule();
+}
+
+pub const CsOptions = struct {
+    /// A `.sal` file.
+    source: std.Build.LazyPath,
+    /// Gives the schema its pointer size. The C# only works in processes with that size.
+    target: std.Build.ResolvedTarget,
+    /// What to call the file.
+    name: []const u8,
+    /// The file's namespace. None if empty.
+    namespace: []const u8 = "",
+    /// The static class for its constants.
+    class: []const u8 = "Schema",
+};
+
+/// A folder with `Salamander.cs`, `SalamanderCore.cs` made from `core.sal`, and C# for `source`, to
+/// compile into a C# project, like `<Compile Include="$(SalamanderDir)/*.cs" />`. The project needs
+/// `AllowUnsafeBlocks` and .NET 8 or newer.
+pub fn csFiles(dep: *std.Build.Dependency, options: CsOptions) std.Build.LazyPath {
+    return csFilesWith(dep.builder, dep.artifact("salamander-gen"), options);
+}
+
+fn csFilesWith(b: *std.Build, gen: *std.Build.Step.Compile, options: CsOptions) std.Build.LazyPath {
+    const pointer_size = b.fmt("{d}", .{options.target.result.ptrBitWidth() / 8});
+    const core = b.addRunArtifact(gen);
+    core.addArg("cs");
+    const core_cs = core.addOutputFileArg("SalamanderCore.cs");
+    core.addFileArg(b.path("src/runtime/core.sal"));
+    core.addArgs(&.{ "--pointer-size", pointer_size, "--core" });
+    const run = b.addRunArtifact(gen);
+    run.addArg("cs");
+    const out = run.addOutputFileArg(options.name);
+    run.addFileArg(options.source);
+    run.addArgs(&.{ "--pointer-size", pointer_size, "--class", options.class });
+    if (options.namespace.len > 0) run.addArgs(&.{ "--namespace", options.namespace });
+    const files = b.addWriteFiles();
+    _ = files.addCopyFile(b.path("src/cs/Salamander.cs"), "Salamander.cs");
+    _ = files.addCopyFile(core_cs, "SalamanderCore.cs");
+    _ = files.addCopyFile(out, options.name);
+    return files.getDirectory();
 }
 
 pub const CHeaderOptions = struct {

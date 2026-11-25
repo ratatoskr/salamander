@@ -1,5 +1,7 @@
 //! `salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]`
 //! `salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]`
+//! `salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]`
+//! `--namespace NS` and `--class NAME` are where C# puts the schema, and its constants.
 //! `salamander-gen bundle <out.sal> <in>`
 //! `<in>` is a `.sal` file or a folder whose `.sal` files, nested too, make one schema.
 //! `--use NS` puts a tool's namespace in scope, like a `use` in every file.
@@ -12,6 +14,7 @@ const std = @import("std");
 const salamander_schema = @import("salamander_schema");
 const salamander_zig = @import("salamander_zig");
 const salamander_c = @import("salamander_c");
+const salamander_cs = @import("salamander_cs");
 
 const Schema = salamander_schema.Schema;
 
@@ -22,14 +25,17 @@ pub fn main(init: std.process.Init) !void {
     _ = args.skip();
     const lang = args.next() orelse return usage();
     const is_c = std.mem.eql(u8, lang, "c");
+    const is_cs = std.mem.eql(u8, lang, "cs");
     const is_bundle = std.mem.eql(u8, lang, "bundle");
-    if (!is_c and !is_bundle and !std.mem.eql(u8, lang, "zig")) return usage();
+    if (!is_c and !is_cs and !is_bundle and !std.mem.eql(u8, lang, "zig")) return usage();
     const out_path = args.next() orelse return usage();
     const in_path = args.next() orelse return usage();
     var pointer_size: u8 = @sizeOf(usize);
     var runtime: []const u8 = "salamander_runtime";
     var check = false;
     var prefix: []const u8 = "";
+    var namespace: []const u8 = "";
+    var class: []const u8 = "Schema";
     var core = false;
     var uses: std.ArrayList([]const u8) = .empty;
     var with: std.ArrayList([2][]const u8) = .empty;
@@ -44,6 +50,10 @@ pub fn main(init: std.process.Init) !void {
             check = true;
         } else if (std.mem.eql(u8, arg, "--prefix")) {
             prefix = args.next() orelse return usage();
+        } else if (std.mem.eql(u8, arg, "--namespace")) {
+            namespace = args.next() orelse return usage();
+        } else if (std.mem.eql(u8, arg, "--class")) {
+            class = args.next() orelse return usage();
         } else if (std.mem.eql(u8, arg, "--core")) {
             core = true;
         } else if (std.mem.eql(u8, arg, "--use")) {
@@ -80,13 +90,15 @@ pub fn main(init: std.process.Init) !void {
     const label = std.fs.path.basename(in_path);
     const written = if (is_c)
         salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core }, &diag)
+    else if (is_cs)
+        salamander_cs.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .class = class, .core = core }, &diag)
     else
         salamander_zig.write(arena, parsed.schema, &out.writer, .{ .label = label, .runtime = runtime, .source = source, .aliases = aliases.items }, &diag);
     written catch |err| switch (err) {
         error.NameClash => fail(in_path, is_dir, diag.message()),
         else => return err,
     };
-    const text = if (is_c) out.written() else try formatted(arena, out.written());
+    const text = if (is_c or is_cs) out.written() else try formatted(arena, out.written());
     if (check) {
         const have = std.Io.Dir.cwd().readFileAlloc(io, out_path, arena, .limited(16 << 20)) catch "";
         if (!std.mem.eql(u8, std.mem.trim(u8, have, "\r\n"), std.mem.trim(u8, text, "\r\n"))) {
@@ -151,6 +163,7 @@ fn usage() error{Usage} {
     std.debug.print(
         \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]
         \\       salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]
+        \\       salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]
         \\       salamander-gen bundle <out.sal> <in>
         \\<in> is a .sal file, or a folder of them that make one schema.
         \\

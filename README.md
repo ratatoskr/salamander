@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/github/license/ratatoskr/salamander)](https://github.com/ratatoskr/salamander/blob/main/LICENSE)
 [![Zig](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2Fratatoskr%2Fsalamander%2Fmain%2Fbuild.zig.zon&search=minimum_zig_version%5Cs%2A%3D%5Cs%2A%22%28%5B%5E%22%2B%5D%2B%29&replace=%241&label=zig&color=f7a41d&logo=zig&logoColor=white)](https://github.com/ratatoskr/salamander/blob/main/build.zig.zon)
 
-Typed interfaces between Zig, C, JavaScript and Lua. Write your API once in a `.sal` schema, and plugins, scripts and native code all call each other through it. C++, Rust and C# are being considered next.
+Typed interfaces between Zig, C, C#, JavaScript and Lua. Write your API once in a `.sal` schema, and plugins, scripts and native code all call each other through it. C++ and Rust are being considered next.
 
 Pre-release. Expect breaking changes.
 
@@ -13,9 +13,11 @@ Pre-release. Expect breaking changes.
 - `.sal` schemas: structs, enums, bitfields, errors, and traits with plain, async and failing methods.
 - Namespaces, and generic structs that make a struct for each set of types they're used with.
 - Generates Zig, with plain types and their wire forms, and C headers.
+- Generates C# that's the same JIT'd or compiled with NativeAOT. A raw layer of blittable structs and `delegate* unmanaged` tables, and plain C# over it: namespaces, strings, spans, exceptions for errors, tasks for async methods, delegates for callbacks, and interfaces to implement traits with.
 - TypeScript and LuaLS typings for scripts' editors.
 - Trait objects that cross DLLs, checked by hash, and stop when their owner goes.
 - JavaScript (QuickJS-ng) and Lua 5.5 scripts call traits and implement them.
+- Hosts .NET 10+ through hostfxr, joining the CoreCLR already in the process or starting one, and calls C#'s `[UnmanagedCallersOnly]` methods.
 - Calls and detours for signatures only known at runtime.
 - Describes code that already exists too, like a game's structs, vtables and functions.
 - Edits `.sal` text in place, for editors and tools.
@@ -94,6 +96,8 @@ zig build test
 ```
 
 `zig build build-test` builds the test programs into `zig-out/bin` without running them. Pass `-Dtarget=` to build for another platform, like `x86_64-linux-musl`.
+
+The `salamander_clr` tests build a small C# project with C# generated from `src/clr/test.sal`, so they need the .NET 10 SDK on `PATH`, and a .NET 10 runtime for the target's arch. Without them they're skipped.
 
 `src/runtime/core.zig` is generated from `core.sal`. After changing it, run `zig build core`.
 

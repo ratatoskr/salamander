@@ -1,0 +1,56 @@
+// What the clr tests pass between Zig and C#
+
+struct Vec3 { f32 x; f32 y; f32 z; }
+
+enum Mode : u8 { off, on = 3 }
+
+bitfield Flags : u32 {
+    bool alive;
+    [Bit(4)] u8 level;
+    Mode mode : 2;
+}
+
+union Num {
+    i32 int;
+    f32 float;
+}
+
+struct Mixed {
+    u8 small;
+    [0x8] u64 big;
+    bool yes;
+    Vec3 at;
+    u16[3] shorts;
+    Flags flags;
+    Vec3*[2] points;
+    Num num;
+}
+
+error Fail { Bad = 5 }
+
+// Holds a string and a slice, so plain C# has it as a class
+struct Tagged {
+    string tag;
+    []u32 ids;
+    Vec3 at;
+}
+
+fn bool Visit(u32 i);
+
+trait Counter {
+    u32 add(u32 n);
+    Vec3 scale(Vec3 v, f32 by);
+    bool flip(bool b);
+    string name();
+    u32!Fail check(u32 n);
+    Mixed echo(Mixed m);
+    ?u32 find(u32 n);
+    string greet(string who);
+    u32 sum([]u32 ids);
+    []u32 range(u32 n);
+    Tagged retag(Tagged t);
+    u32 each(u32 n, Visit visit);
+    async u32 later(u32 n);
+    async u32!Fail laterCheck(u32 n);
+    void bump(inout Vec3 v);
+}
