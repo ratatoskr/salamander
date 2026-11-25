@@ -305,6 +305,19 @@ test "plain functions from a signature parsed while running: called, and detoure
     const detoured: *const fn (i32, i64, u8) callconv(.c) i32 = @ptrFromInt(bind.Detour(Plain.find).address());
     try testing.expectEqual(Plain.add(1, 2, 3) + 100, detoured(1, 2, 3));
 
+    // Functions of their own, each with its own ctx, like a host giving code for declared ones
+    const Own = struct {
+        fn dispatch(ctx: usize, _: u32, args: []const [*]u8, value: [*]u8) u32 {
+            const sum = std.mem.bytesToValue(i32, args[0][0..4]) + @as(i32, @intCast(ctx));
+            @memcpy(value[0..4], std.mem.asBytes(&sum));
+            return 0;
+        }
+    };
+    const plus_one: *const fn (i32, i64, u8) callconv(.c) i32 = @ptrFromInt(try bind.function(add, 1, Own.dispatch));
+    const plus_two: *const fn (i32, i64, u8) callconv(.c) i32 = @ptrFromInt(try bind.function(add, 2, Own.dispatch));
+    try testing.expectEqual(11, plus_one(10, 0, 0));
+    try testing.expectEqual(12, plus_two(10, 0, 0));
+
     // What's wrong points into the signature
     try testing.expectError(error.InvalidSchema, salamander_schema.parseSignature(testing.allocator, source, "fn Nope (u32 a)", .{}, &diag));
     try testing.expect(std.mem.indexOf(u8, diag.message(), "Nope") != null);

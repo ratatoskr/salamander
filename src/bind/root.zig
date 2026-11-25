@@ -122,6 +122,38 @@ pub fn Detour(comptime find: fn () *const FnRecord) type {
     };
 }
 
+/// Most native functions `function` makes, for the whole process.
+pub const max_functions = 256;
+
+var function_records: [max_functions]FnRecord = undefined;
+var functions_made: std.atomic.Value(u32) = .init(0);
+
+/// A native function of `f`'s type whose calls all go to `dispatch` with `ctx`, as method 0, like a host
+/// giving code for a function a schema declares. It's for good, since whoever has its address can call
+/// it, so make one per function and keep it.
+pub fn function(f: *const Function, ctx: usize, dispatch: Dispatch) error{TooManyFunctions}!usize {
+    const n = functions_made.fetchAdd(1, .monotonic);
+    if (n >= max_functions) return error.TooManyFunctions;
+    function_records[n] = .{ .function = f, .ctx = ctx, .dispatch = dispatch };
+    return functionAddress(n);
+}
+
+fn functionAddress(n: usize) usize {
+    @setEvalBranchQuota(100_000);
+    inline for (0..max_functions) |i| if (i == n) return @intFromPtr(&FunctionEntry(i).entry);
+    unreachable;
+}
+
+fn FunctionEntry(comptime n: usize) type {
+    @setEvalBranchQuota(10_000);
+    return dyn.Detour(struct {
+        fn handler(frame: *dyn.Frame) callconv(.c) void {
+            const r = &function_records[n];
+            handle(frame, &r.function.lowered, r.ctx, r.dispatch, 0);
+        }
+    }.handler);
+}
+
 /// Calls slot `i` of `obj`, a `t`. `args[k]` points at argument k's memory and the value goes to `value`,
 /// which has room for it. Gives a result's code, or 0 for anything else. A missing method or one that
 /// can't cross gives zero, or `Unsupported` for a result, and one whose owner closed gives zero or `Gone`.
