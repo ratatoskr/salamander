@@ -4,6 +4,11 @@
 //!
 //! A process only gets one runtime, and only the hostfxr that started it can join it, so `open`
 //! always uses the hostfxr that's already loaded if there is one. .NET 10 or newer.
+//!
+//! On Linux, glibc puts every thread's static thread-locals on its stack, and .NET makes some threads
+//! with only 256KB, like its thread pool's. Zig gives each thread a 256KB signal stack as a
+//! thread-local by default, which leaves them no room, so a Zig program hosting .NET there wants
+//! `pub const std_options: std.Options = .{ .signal_stack_size = null };` in its root.
 
 const std = @import("std");
 const sys = @import("salamander_sys");

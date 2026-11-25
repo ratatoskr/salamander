@@ -20,8 +20,8 @@ fn host() !*const clr.Host {
     defer messages.deinit();
     const was_running = clr.running();
     shared = clr.Host.open(testing.allocator, testing.io, .{ .runtime_config = probe.runtime_config, .messages = &messages.writer }) catch |e| {
-        // No .NET for this arch, like x86 tests on a machine with only x64's
-        if (e == error.NoDotnet) return error.SkipZigTest;
+        // No .NET for this process, like x86 or musl tests on a machine with only x64 glibc's
+        if (e == error.NoDotnet or e == error.LoadFailed) return error.SkipZigTest;
         std.debug.print("hostfxr {x}: {s}\n", .{ @as(u32, @bitCast(clr.lastStatus())), messages.written() });
         return e;
     };

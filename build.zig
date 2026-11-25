@@ -71,7 +71,7 @@ pub fn build(b: *std.Build) void {
         clr.link_libc = true;
         clr_tests.link_libc = true;
     }
-    ctx.addTests("clr", clr_tests);
+    ctx.addTestsWith("clr", clr_tests, noSignalStackRunner(b));
     const hosts = ctx.addModule("hosts", &.{
         .{ .name = "salamander_script", .module = script },
         .{ .name = "salamander_js", .module = js },
@@ -146,6 +146,27 @@ pub fn build(b: *std.Build) void {
     ctx.addTests("agree", agree);
 }
 
+/// Zig's own test runner, without its signal stack per thread. It's a thread-local, which on Linux
+/// goes on every thread's stack, and .NET's 256KB threads have no room for it. See `salamander_clr`.
+fn noSignalStackRunner(b: *std.Build) std.Build.Step.Compile.TestRunner {
+    const files = b.addWriteFiles();
+    _ = files.addCopyFile(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"), "zig_test_runner.zig");
+    const root = files.add("runner.zig",
+        \\const std = @import("std");
+        \\const runner = @import("zig_test_runner.zig");
+        \\
+        \\pub const std_options: std.Options = blk: {
+        \\    var o = runner.std_options;
+        \\    o.signal_stack_size = null;
+        \\    break :blk o;
+        \\};
+        \\pub const main = runner.main;
+        \\pub const fuzz = runner.fuzz;
+        \\
+    );
+    return .{ .path = root, .mode = .server };
+}
+
 /// The C# the clr tests call, built with the dotnet SDK along with the C# for their schema in
 /// `schema`. Its paths are empty without the SDK, and the tests are skipped. Only looked for when
 /// salamander's the root build, since looking means configuring again every build.
@@ -158,7 +179,7 @@ fn clrProbe(b: *std.Build, schema: std.Build.LazyPath) *std.Build.Module {
     };
     const run = b.addSystemCommand(&.{ dotnet, "build" });
     run.addFileArg(b.path("src/clr/test/Probe.csproj"));
-    run.addArgs(&.{ "--nologo", "-clp:ErrorsOnly;NoSummary", "-c", "Release", "-o" });
+    run.addArgs(&.{ "--nologo", "-v", "quiet", "-clp:ErrorsOnly;NoSummary", "-c", "Release", "-o" });
     const out = run.addOutputDirectoryArg("probe");
     // Keeps obj out of the source tree
     run.addArg("--artifacts-path");
@@ -168,6 +189,8 @@ fn clrProbe(b: *std.Build, schema: std.Build.LazyPath) *std.Build.Module {
     run.addFileInput(b.path("src/clr/test/Traits.cs"));
     run.setEnvironmentVariable("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
     run.setEnvironmentVariable("DOTNET_NOLOGO", "1");
+    // dotnet writes its errors to stdout
+    run.stdio = .inherit;
     options.addOptionPath("dll", out.path(b, "Probe.dll"));
     options.addOptionPath("runtime_config", out.path(b, "Probe.runtimeconfig.json"));
     return options.createModule();
@@ -395,7 +418,11 @@ const Context = struct {
     }
 
     fn addTests(self: Context, comptime name: []const u8, mod: *std.Build.Module) void {
-        const tests = self.b.addTest(.{ .name = "salamander_" ++ name ++ "_tests", .root_module = mod, .filters = self.test_filters });
+        self.addTestsWith(name, mod, null);
+    }
+
+    fn addTestsWith(self: Context, comptime name: []const u8, mod: *std.Build.Module, runner: ?std.Build.Step.Compile.TestRunner) void {
+        const tests = self.b.addTest(.{ .name = "salamander_" ++ name ++ "_tests", .root_module = mod, .filters = self.test_filters, .test_runner = runner });
         const run_artifact = self.b.addRunArtifact(tests);
         run_artifact.has_side_effects = true;
         self.test_step.dependOn(&run_artifact.step);
