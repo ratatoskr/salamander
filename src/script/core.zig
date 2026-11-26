@@ -321,6 +321,12 @@ pub fn Core(comptime L: type) type {
             }
         };
 
+        /// Where the declared `name` is, found by the locator.
+        pub fn addressOf(self: *Self, name: []const u8) LocateError!usize {
+            const l = self.locator orelse return error.NoLocator;
+            return l.address(l.ctx, name);
+        }
+
         /// A [Virtual(n)] one's found through `this`'s vtable.
         pub fn declaredAddress(self: *Self, name: []const u8, f: Schema.Function, this: usize) LocateError!usize {
             const l = self.locator orelse return error.NoLocator;

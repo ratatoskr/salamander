@@ -183,14 +183,43 @@ pub fn module(self: *Script, name: []const u8, exports: []const engine.Export) e
     try self.natives.add(self.gpa, name, exports);
 }
 
-pub fn globals(self: *Script, roots: []const engine.Export) engine.Error!void {
+pub fn namespaces(self: *Script, name: []const u8, roots: []const engine.Export, globals: bool) engine.Error!void {
     self.binder.core.enter();
     defer self.binder.core.leave();
     const l = self.l;
-    var buf: [128]u8 = undefined;
-    const clash = self.binder.schemaGlobals(l, &buf) catch |err| return self.failed(err);
-    if (clash) |n| return self.failedWith("the namespace {s} would hide Lua's own {s}", .{ n, n });
-    for (roots) |r| self.binder.exposeRoot(l, r.schema, r.trait, r.obj) catch |err| return self.failed(err);
+    const base = lua.top(l);
+    defer c.lua_settop(l, base);
+    self.binder.pushSchema(l) catch |err| return self.failed(err);
+    const all = lua.top(l);
+    for (roots) |r| self.binder.exposeRoot(l, all, r.schema, r.trait, r.obj) catch |err| return self.failed(err);
+    if (globals) {
+        var buf: [128]u8 = undefined;
+        const clash = self.binder.globalsFrom(l, all, &buf) catch |err| return self.failed(err);
+        if (clash) |n| return self.failedWith("the namespace {s} would hide Lua's own {s}", .{ n, n });
+    }
+    lua.pushRef(l, self.loaded);
+    c.lua_pushvalue(l, all);
+    lua.rawSet(l, lua.top(l) - 1, name);
+}
+
+pub fn extend(self: *Script, s: *const script.Module, trait: []const u8, source: []const u8) engine.Error!void {
+    self.binder.core.enter();
+    defer self.binder.core.leave();
+    const l = self.l;
+    const base = lua.top(l);
+    defer c.lua_settop(l, base);
+    const t = self.binder.trait(s, trait) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => self.failedWith("no trait {s}", .{trait}),
+    };
+    var name_buf: [256:0]u8 = undefined;
+    const name = std.fmt.bufPrintSentinel(&name_buf, "={s} methods", .{trait}, 0) catch return error.OutOfMemory;
+    if (lua.load(l, source, name) != lua.ok) {
+        self.binder.keepError(l);
+        return self.keepPending();
+    }
+    if (!self.binder.protectedCall(l, 0)) return self.keepPending();
+    self.binder.extend(l, t, -1) catch |err| return self.failed(err);
 }
 
 /// The task promise on top's state. Lets go of the marker `run` puts on it.
@@ -358,6 +387,9 @@ fn require(self: *Script, l: *State) Binder.Error!c_int {
     c.lua_settop(l, 1);
     lua.pushRef(l, self.loaded);
     const loaded = lua.top(l);
+    // What `namespaces` made, or a native module already loaded
+    if (lua.rawGet(l, loaded, name) != c.LUA_TNIL) return 1;
+    lua.pop(l, 1);
 
     if (std.mem.eql(u8, name, Binder.builtin_module)) {
         if (lua.rawGet(l, loaded, name) != c.LUA_TNIL) return 1;

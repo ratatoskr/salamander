@@ -46,6 +46,8 @@ copy_atom: c.JSAtom = 0,
 cache: c.JSAtom,
 /// On functions `salamander.fn` typed, holding their signature's trait.
 fn_tag: c.JSAtom,
+/// On declared functions, holding their full name for `nameOf`.
+declared_tag: c.JSAtom,
 /// Set while converting a borrowed argument for the script, to boxes that stop working after.
 lent_boxes: ?*std.ArrayList(Value) = null,
 awaits: std.ArrayList(*Await) = .empty,
@@ -92,9 +94,13 @@ pub fn init(gpa: Allocator, ctx: *qjs.Context, options: Options) error{ OutOfMem
     const tag = c.JS_NewPrivateSymbol(ctx, qjs.cstr("salamander.fn"));
     if (c.JS_IsException(tag)) return error.Exception;
     defer c.JS_FreeValue(ctx, tag);
-    b.* = .{ .core = undefined, .ctx = ctx, .report = options.report, .cache = c.JS_ValueToAtom(ctx, sym), .fn_tag = c.JS_ValueToAtom(ctx, tag) };
+    const declared = c.JS_NewPrivateSymbol(ctx, qjs.cstr("salamander.declared"));
+    if (c.JS_IsException(declared)) return error.Exception;
+    defer c.JS_FreeValue(ctx, declared);
+    b.* = .{ .core = undefined, .ctx = ctx, .report = options.report, .cache = c.JS_ValueToAtom(ctx, sym), .fn_tag = c.JS_ValueToAtom(ctx, tag), .declared_tag = c.JS_ValueToAtom(ctx, declared) };
     errdefer c.JS_FreeAtom(ctx, b.cache);
     errdefer c.JS_FreeAtom(ctx, b.fn_tag);
+    errdefer c.JS_FreeAtom(ctx, b.declared_tag);
     const jrt = c.JS_GetRuntime(ctx);
     _ = c.JS_NewClassID(jrt, &b.class);
     var def = std.mem.zeroes(c.JSClassDef);
@@ -117,6 +123,7 @@ pub fn deinit(b: *Binder) void {
     b.awaits.deinit(gpa);
     c.JS_FreeAtom(b.ctx, b.cache);
     c.JS_FreeAtom(b.ctx, b.fn_tag);
+    c.JS_FreeAtom(b.ctx, b.declared_tag);
     c.JS_FreeAtom(b.ctx, b.copy_atom);
     gpa.destroy(b);
 }
@@ -316,7 +323,7 @@ pub fn unwrapFn(b: *Binder, t: *Trait, v: Value) convert.Error!rt.AnyObject {
 // The `salamander` module scripts import, for types they write while running
 
 pub const builtin_module = "salamander";
-pub const builtin_exports = [_][:0]const u8{ "fn", "native", "at", "addressOf", "typeOf", "sizeOf", "snapshot", "save", "edit", "load" };
+pub const builtin_exports = [_][:0]const u8{ "fn", "native", "at", "addressOf", "typeOf", "sizeOf", "snapshot", "save", "edit", "load", "nameOf", "params" };
 
 /// One of `builtin_exports`, as a function.
 pub fn builtin(b: *Binder, name: []const u8) Value {
@@ -333,6 +340,8 @@ pub fn builtin(b: *Binder, name: []const u8) Value {
         .{ "save", &builtinSave },
         .{ "edit", &builtinEdit },
         .{ "load", &builtinLoad },
+        .{ "nameOf", &builtinNameOf },
+        .{ "params", &builtinParams },
     };
     const f = for (table) |e| {
         if (std.mem.eql(u8, e[0], name)) break e[1];
@@ -471,7 +480,10 @@ fn binderData(ctx: *qjs.Context, v: Value) *Binder {
 }
 
 fn signatureArg(b: *Binder, v: Value) convert.Error!script.Core(Binder).Signature {
-    const text = qjs.toString(b.ctx, v) orelse return error.Exception;
+    // A declared function stands for its own signature
+    const declared = b.declaredName(v);
+    defer c.JS_FreeValue(b.ctx, declared);
+    const text = qjs.toString(b.ctx, if (c.JS_IsString(declared)) declared else v) orelse return error.Exception;
     defer text.free();
     var diag: Schema.Diagnostic = .{};
     return b.core.signature(text.slice(), &diag) catch |e| switch (e) {
@@ -483,6 +495,7 @@ fn signatureArg(b: *Binder, v: Value) convert.Error!script.Core(Binder).Signatur
 }
 
 /// `fn(signature, f)` types `f`, so native code taking an object gets a function value of that type.
+/// A declared function works as its signature too.
 fn builtinFn(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
     const ctx = ctx_.?;
     const b = binderData(ctx, data[0]);
@@ -490,6 +503,35 @@ fn builtinFn(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_i
     const sig = b.signatureArg(argv[0]) catch |e| return failed(ctx, e);
     if (c.JS_SetProperty(ctx, argv[1], b.fn_tag, c.JS_NewInt64(ctx, @bitCast(@as(u64, @intFromPtr(sig.trait))))) < 0) return qjs.exception;
     return c.JS_DupValue(ctx, argv[1]);
+}
+
+/// The full name of a declared function, like `Kai.Player.heal`, or undefined. Caller frees it.
+fn declaredName(b: *Binder, v: Value) Value {
+    if (!c.JS_IsFunction(b.ctx, v)) return qjs.undefined_value;
+    return c.JS_GetProperty(b.ctx, v, b.declared_tag);
+}
+
+/// `nameOf(f)`, the full name of a declared function like `Kai.Player.heal`, or undefined for
+/// anything else.
+fn builtinNameOf(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    if (argc < 1) return qjs.undefined_value;
+    return binderData(ctx, data[0]).declaredName(argv[0]);
+}
+
+/// `params(f)`, the names of a function's parameters as written. One that isn't a plain name, like
+/// `{ a, b }`, is "".
+fn builtinParams(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, _: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    if (argc < 1 or !c.JS_IsFunction(ctx, argv[0])) return qjs.throw(ctx, "params takes a function", .{});
+    const text = qjs.toString(ctx, argv[0]) orelse return qjs.exception;
+    defer text.free();
+    const out = c.JS_NewArray(ctx);
+    if (c.JS_IsException(out)) return out;
+    var it = script.params(text.slice());
+    var i: u32 = 0;
+    while (it.next()) |name| : (i += 1) _ = c.JS_SetPropertyUint32(ctx, out, i, qjs.string(ctx, name));
+    return out;
 }
 
 /// `native(signature, address)`, the native function at `address`.
@@ -670,17 +712,49 @@ fn fillSchema(b: *Binder, all: Value, s: Schema) convert.Error!void {
         }
         if (s.findFunction(std.fmt.bufPrint(&buf, "{s}.at", .{t.name}) catch continue) == null)
             qjs.set(ctx, class, "at", try b.classAt(t.name));
+        const st = t.kind.@"struct";
+        for (st.methods) |m| if (m.virtual == null) {
+            const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ t.name, m.name }) catch continue;
+            try b.addressIn(class, m.name, full);
+        };
+        for (st.statics) |v| {
+            const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ t.name, v.name }) catch continue;
+            try b.addressIn(class, v.name, full);
+        }
     }
     for (s.functions) |f| {
         const in, const leaf = try b.namespaceIn(all, f.name);
         defer c.JS_FreeValue(ctx, in);
         qjs.set(ctx, in, leaf, try b.declaredFunction(f.name, f.signature.params.len));
+        try b.addressIn(in, leaf, f.name);
     }
     for (s.statics) |v| {
         const in, const leaf = try b.namespaceIn(all, v.name);
         defer c.JS_FreeValue(ctx, in);
         try b.declaredStatic(in, leaf, v.name);
+        try b.addressIn(in, leaf, v.name);
     }
+}
+
+/// `addresses[leaf]()` on `holder`, where `full` is, like Zig's and C#'s.
+fn addressIn(b: *Binder, holder: Value, leaf: []const u8, full: []const u8) convert.Error!void {
+    const ctx = b.ctx;
+    const addresses = try b.objectIn(holder, "addresses");
+    defer c.JS_FreeValue(ctx, addresses);
+    var data = [_]Value{ b.binderWord(), qjs.string(ctx, full) };
+    defer c.JS_FreeValue(ctx, data[1]);
+    const f = c.JS_NewCFunctionData(ctx, addressJs, 0, 0, data.len, &data);
+    if (c.JS_IsException(f)) return error.Exception;
+    qjs.set(ctx, addresses, leaf, f);
+}
+
+fn addressJs(ctx_: ?*qjs.Context, _: Value, _: c_int, _: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    const b = binderData(ctx, data[0]);
+    const name = qjs.toString(ctx, data[1]) orelse return qjs.exception;
+    defer name.free();
+    const at = b.core.addressOf(name.slice()) catch |e| return b.locateFailed(name.slice(), e);
+    return c.JS_NewInt64(ctx, @bitCast(@as(u64, at)));
 }
 
 /// The object for `name`'s namespace under `all`, made on the way, and the rest of its name. So
@@ -690,43 +764,42 @@ fn namespaceIn(b: *Binder, all: Value, name: []const u8) convert.Error!struct { 
     return .{ try b.objectIn(all, name[0..end]), name[end + 1 ..] };
 }
 
-// Globals: each namespace at the top, like `Wraith`, and what `[Root]` objects give
+// Namespaces: each one at the top, like `Wraith`, and what `[Root]` objects give
 
-/// Each namespace at the top of what's loaded, like `Wraith` and `Kai`, as a global with what's in
-/// it. Gives the name of one that would hide a global JS has already, like `Math`, copied into
-/// `clash`, setting none.
-pub fn schemaGlobals(b: *Binder, clash: []u8) convert.Error!?[]const u8 {
+/// The namespaces at the top of `all`, from `schemaObject`, as globals. Gives the name of one that
+/// would hide a global JS has already, like `Math`, copied into `clash`, setting none.
+pub fn globalsFrom(b: *Binder, all: Value, clash: []u8) convert.Error!?[]const u8 {
     const ctx = b.ctx;
-    var arena: std.heap.ArenaAllocator = .init(b.core.gpa);
-    defer arena.deinit();
-    var names: std.ArrayList([:0]const u8) = .empty;
-    try b.schemaExports(&names, arena.allocator());
+    var tab: [*c]c.JSPropertyEnum = null;
+    var len: u32 = 0;
+    if (c.JS_GetOwnPropertyNames(ctx, &tab, &len, all, c.JS_GPN_STRING_MASK | c.JS_GPN_ENUM_ONLY) < 0) return error.Exception;
+    defer c.JS_FreePropertyEnum(ctx, tab, len);
     const g = c.JS_GetGlobalObject(ctx);
     defer c.JS_FreeValue(ctx, g);
-    for (names.items) |n| {
-        const have = qjs.get(ctx, g, n);
+    for (tab[0..len]) |p| {
+        const have = c.JS_GetProperty(ctx, g, p.atom);
         defer c.JS_FreeValue(ctx, have);
         if (c.JS_IsUndefined(have)) continue;
-        const len = @min(n.len, clash.len);
-        @memcpy(clash[0..len], n[0..len]);
-        return clash[0..len];
+        const key = c.JS_AtomToCString(ctx, p.atom);
+        defer c.JS_FreeCString(ctx, key);
+        const n = std.mem.span(key);
+        const used = @min(n.len, clash.len);
+        @memcpy(clash[0..used], n[0..used]);
+        return clash[0..used];
     }
-    const all = try b.schemaObject();
-    defer c.JS_FreeValue(ctx, all);
-    for (names.items) |n| qjs.set(ctx, g, n, qjs.get(ctx, all, n));
+    for (tab[0..len]) |p| _ = c.JS_SetProperty(ctx, g, p.atom, c.JS_GetProperty(ctx, all, p.atom));
     return null;
 }
 
-/// A `[Root]` object of `trait` in `m`. Each accessor, like `tweaks()`, is a function on its
-/// namespace's global, like `Wraith.tweaks()`, and each trait one gives has `instance()` the same.
-/// So does the root's own trait, giving it.
-pub fn exposeRoot(b: *Binder, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) convert.Error!void {
+/// A `[Root]` object of `trait` in `m`, on the namespaces in `all`. Each accessor, like `tweaks()`, is
+/// a function on its namespace, like `Wraith.tweaks()`, and each trait one gives has `instance()`
+/// the same. So does the root's own trait, giving it.
+pub fn exposeRoot(b: *Binder, all: Value, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) convert.Error!void {
     const ctx = b.ctx;
     const t = try b.trait(m, trait_name);
     const root = try b.wrap(t, obj);
     defer c.JS_FreeValue(ctx, root);
-    const g = c.JS_GetGlobalObject(ctx);
-    defer c.JS_FreeValue(ctx, g);
+    const g = all;
     const s = m.schema();
     const decl = s.findTrait(trait_name) orelse return;
     const ns = if (Schema.namespaceEnd(trait_name)) |end| try b.objectIn(g, trait_name[0..end]) else c.JS_DupValue(ctx, g);
@@ -752,6 +825,31 @@ pub fn exposeRoot(b: *Binder, m: *const Module, trait_name: []const u8, obj: rt.
     const own = try b.objectIn(g, trait_name);
     defer c.JS_FreeValue(ctx, own);
     qjs.set(ctx, own, "instance", try b.accessor(root, ""));
+}
+
+/// Puts each function of `methods` on every `t` object, leaving its own methods be.
+pub fn extend(b: *Binder, t: *Trait, methods: Value) convert.Error!void {
+    const ctx = b.ctx;
+    if (t.sig != null) return convert.throw(ctx, "a fn value's type can't get methods", .{});
+    var tab: [*c]c.JSPropertyEnum = null;
+    var len: u32 = 0;
+    if (c.JS_GetOwnPropertyNames(ctx, &tab, &len, methods, c.JS_GPN_STRING_MASK | c.JS_GPN_ENUM_ONLY) < 0) return error.Exception;
+    defer c.JS_FreePropertyEnum(ctx, tab, len);
+    for (tab[0..len]) |p| {
+        const have = c.JS_GetProperty(ctx, t.lang.proto, p.atom);
+        defer c.JS_FreeValue(ctx, have);
+        if (!c.JS_IsUndefined(have)) {
+            const name = c.JS_AtomToCString(ctx, p.atom);
+            defer c.JS_FreeCString(ctx, name);
+            return convert.throw(ctx, "{s} already has {s}", .{ t.decl.name, std.mem.span(name) });
+        }
+        const f = c.JS_GetProperty(ctx, methods, p.atom);
+        if (!c.JS_IsFunction(ctx, f)) {
+            c.JS_FreeValue(ctx, f);
+            continue;
+        }
+        if (c.JS_SetProperty(ctx, t.lang.proto, p.atom, f) < 0) return error.Exception;
+    }
 }
 
 /// Calls `root[method]()` once and gives that each time after, or `root` itself for "".
@@ -808,6 +906,7 @@ fn declaredFunction(b: *Binder, name: []const u8, params: usize) convert.Error!V
     defer c.JS_FreeValue(b.ctx, data[1]);
     const f = c.JS_NewCFunctionData(b.ctx, callDeclaredJs, @intCast(params), 0, data.len, &data);
     if (c.JS_IsException(f)) return error.Exception;
+    _ = c.JS_DefinePropertyValue(b.ctx, f, b.declared_tag, qjs.string(b.ctx, name), 0);
     return f;
 }
 

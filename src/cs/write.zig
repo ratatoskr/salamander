@@ -833,6 +833,52 @@ const Gen = struct {
             \\    }}
             \\
         , .{ full, sal, pn, try g.delegateRef(fv), sal, try g.convRef(), fv.name });
+
+        // It as a value, for typed hooks
+        const call_sig: Schema.Method = .{ .name = "call", .signature = sig };
+        const cs = try g.plainSig(&call_sig, "call", null);
+        var hook_name: []const u8 = "hook";
+        for (sig.params) |p| if (std.mem.eql(u8, p.name, "hook")) {
+            hook_name = "hook_";
+        };
+        const handler = try g.delegateRef(fv);
+        try g.print(
+            \\
+            \\    public static partial class Fns
+            \\    {{
+            \\        /// <summary>`{s}` as a value, for typed hooks and the like.</summary>
+            \\        public static readonly {s}Fn {s} = new();
+            \\
+            \\        public sealed class {s}Fn : {s}DeclaredFunction<{s}, {s}Fn.HookedHandler>
+            \\        {{
+            \\            internal {s}Fn() : base("{s}") {{ }}
+            \\
+            \\            /// <summary>What a hooked handler gets first: the function as it was, and the hook's context.</summary>
+            \\            public readonly struct Hooked({s}HookCell cell)
+            \\            {{
+            \\                public {s} Original() => ({s})cell.Original;
+            \\                public nuint Context => cell.Context;
+            \\            }}
+            \\
+            \\            public delegate {s} HookedHandler(Hooked {s}{s}{s});
+            \\
+            \\            public override {s}AnyObject Lower({s} handler) => {s}Handler(handler);
+            \\
+            \\            public override {s}AnyObject Lower(HookedHandler handler, {s}HookCell cell) => {s}Handler(({s}) => handler(new Hooked(cell){s}{s}));
+            \\        }}
+            \\    }}
+            \\
+        , .{
+            full,    pn,        pn,
+            pn,      sal,       handler,
+            pn,      pn,        full,
+            sal,     fn_type,   fn_type,
+            cs.ret,  hook_name, if (cs.decl.len > 0) ", " else "",
+            cs.decl, sal,       handler,
+            pn,      sal,       sal,
+            pn,      cs.decl,   if (cs.args.len > 0) ", " else "",
+            cs.args,
+        });
     }
 
     fn sigOf(g: *Gen, f: Extra) Schema.Signature {
@@ -1736,6 +1782,13 @@ test "what existing code declares is found by name, called, and hooked" {
         "public static global::Game.Player* Local() => *(global::Game.Player**)global::Salamander.Declared.Address(\"Player.local\");",
         "public static uint* Count() => (uint*)global::Salamander.Declared.Address(\"Player.count\");",
         "public static global::Salamander.AnyObject HealHandler(",
+        // Each as a value, with handlers of its type
+        "        public static readonly HealFn Heal = new();",
+        "        public sealed class HealFn : global::Salamander.DeclaredFunction<",
+        "            internal HealFn() : base(\"Player.heal\") { }",
+        "                public delegate* unmanaged[Cdecl]<global::Game.Player*, float, void> Original() =>",
+        "            public delegate void HookedHandler(Hooked hook, global::Game.Player* self, float amount);",
+        "=> HealHandler((global::Game.Player* self, float amount) => handler(new Hooked(cell), self, amount));",
         // Top-level ones go in the schema's class, with strings converted
         "    public static int Spawn(uint kind, string name)",
         "SpawnAt(global::Salamander.Declared.Address(\"spawn\"))(kind, global::Salamander.Str.From(name, __a));",

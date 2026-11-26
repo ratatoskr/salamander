@@ -686,15 +686,24 @@ const App = struct {
     }
 };
 
-test "namespaces at the top are globals, and a root's accessors give its objects" {
+test "namespaces at the top are a module, and a root's accessors give its objects" {
     const js =
-        \\globalThis.out = [World.twice(4), World.ticks, greeter().count(), Greeter.instance() === greeter(), App.instance().version()].join(" ");
+        \\import { World, App, Greeter, greeter } from "game";
+        \\import { nameOf, params } from "salamander";
+        \\const p = params((hook, n, x) => n).join(",");
+        \\globalThis.out = [World.twice(4), World.ticks, greeter().count(), Greeter.instance() === greeter(), App.instance().version(), App.instance().twiceVersion(), nameOf(World.twice), p, typeof globalThis.World, World.addresses.twice() > 0].join(" ");
     ;
     const lua_source =
-        \\out = table.concat({ World.twice(4), World.ticks, greeter():count(), tostring(Greeter.instance() == greeter()), App.instance():version() }, " ")
+        \\local game, sal = require("game"), require("salamander")
+        \\local p = table.concat(sal.params(function(hook, n, x) end), ",")
+        \\out = table.concat({ game.World.twice(4), game.World.ticks, game.greeter():count(), tostring(game.Greeter.instance() == game.greeter()), game.App.instance():version(), game.App.instance():twiceVersion(), sal.nameOf(game.World.twice), p, type(World), tostring(game.World.addresses.twice() > 0) }, " ")
     ;
     const sources = [_][]const u8{ js, lua_source };
-    for (&cases, sources) |*case, text| {
+    const methods = [_][]const u8{
+        "({ twiceVersion() { return this.version() * 2; } })",
+        "return { twiceVersion = function(self) return self:version() * 2 end }",
+    };
+    for (&cases, sources, methods) |*case, text, extra| {
         World.counter = .{};
         World.main = &World.counter;
         World.ticks = 3;
@@ -712,13 +721,19 @@ test "namespaces at the top are globals, and a root's accessors give its objects
         var hello: Hello = .{ .greeted = 2 };
         var app: App = .{ .hello = &hello };
         const root: rt.Object(B.App) = .init(&app, rt.implement(B.App, App));
-        try s.globals(&.{.{ .name = "", .schema = types, .trait = "App", .obj = .of(root) }});
-        s.run(text, "globals") catch |e| {
+        try s.namespaces("game", &.{.{ .name = "", .schema = types, .trait = "App", .obj = .of(root) }}, false);
+        try s.extend(types, "App", extra);
+        s.run(text, "namespaces") catch |e| {
             std.debug.print("{t}: {s}\n", .{ case.language, s.lastError() });
             return e;
         };
         var buf: [256]u8 = undefined;
-        try testing.expectEqualStrings("8 3 2 true 7", s.eval("out", &buf).value);
+        const nothing = if (case.language == .js) "undefined" else "nil";
+        var want_buf: [128]u8 = undefined;
+        const want = try std.fmt.bufPrint(&want_buf, "8 3 2 true 7 14 World.twice hook,n,x {s} true", .{nothing});
+        try testing.expectEqualStrings(want, s.eval("out", &buf).value);
+        // Its own methods stay its own
+        try testing.expectError(error.Thrown, s.extend(types, "App", if (case.language == .js) "({ version() { return 0; } })" else "return { version = function() return 0 end }"));
     }
 }
 
@@ -734,7 +749,7 @@ test "a single object that isn't a root is a function by its name, and its trait
         const types = try s.schema(source);
         var hello: Hello = .{};
         const greeter: rt.Object(Greeter) = .init(&hello, rt.implement(Greeter, Hello));
-        try s.globals(&.{.{ .name = "", .schema = types, .trait = "Greeter", .obj = .of(greeter) }});
+        try s.namespaces("game", &.{.{ .name = "", .schema = types, .trait = "Greeter", .obj = .of(greeter) }}, true);
         s.run(text, "single") catch |e| {
             std.debug.print("{t}: {s}\n", .{ case.language, s.lastError() });
             return e;
@@ -750,7 +765,7 @@ test "a namespace can't hide a global the language has" {
         const s = try make(case, &files);
         defer s.deinit();
         _ = try s.schema(text);
-        try testing.expectError(error.Thrown, s.globals(&.{}));
+        try testing.expectError(error.Thrown, s.namespaces("game", &.{}, true));
         try testing.expect(std.mem.indexOf(u8, s.lastError(), "would hide") != null);
     }
 }

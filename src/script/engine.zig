@@ -89,7 +89,8 @@ pub const Script = struct {
         schema: *const fn (ptr: *anyopaque, source: []const u8) Error!*const Module,
         expose: *const fn (ptr: *anyopaque, name: []const u8, export_: Export) Error!void,
         module: *const fn (ptr: *anyopaque, name: []const u8, exports: []const Export) Error!void,
-        globals: *const fn (ptr: *anyopaque, roots: []const Export) Error!void,
+        namespaces: *const fn (ptr: *anyopaque, module: []const u8, roots: []const Export, globals: bool) Error!void,
+        extend: *const fn (ptr: *anyopaque, schema: *const Module, trait: []const u8, source: []const u8) Error!void,
         run: *const fn (ptr: *anyopaque, source: []const u8, name: []const u8) Error!void,
         eval: *const fn (ptr: *anyopaque, source: []const u8, buf: []u8) Evaluated,
         take: *const fn (ptr: *anyopaque, name: []const u8, schema: *const Module, trait: []const u8) Error!rt.AnyObject,
@@ -123,12 +124,20 @@ pub const Script = struct {
         return self.vtable.module(self.ptr, name, exports);
     }
 
-    /// Each namespace at the top of the loaded schemas as a global, like `Wraith` and `Kai`, with
-    /// what's in it. Each of `roots` is a `[Root]` trait's object: its accessors are functions on its
-    /// namespace, like `Wraith.tweaks()`, and the traits they give get `instance()`. Fails with
-    /// nothing set if a namespace would hide one of the language's own globals, like `Math`.
-    pub fn globals(self: Script, roots: []const Export) Error!void {
-        return self.vtable.globals(self.ptr, roots);
+    /// A module `name` scripts import, like `import { Wraith, Kai } from "wraith"` or
+    /// `require("wraith")`, with each namespace at the top of the loaded schemas and what's in it.
+    /// Each of `roots` is a `[Root]` trait's object: its accessors are functions on its namespace,
+    /// like `Wraith.tweaks()`, and the traits they give get `instance()`. With `globals` they're
+    /// globals too, which fails with none set if one would hide the language's own, like `Math`.
+    pub fn namespaces(self: Script, name: []const u8, roots: []const Export, globals: bool) Error!void {
+        return self.vtable.namespaces(self.ptr, name, roots, globals);
+    }
+
+    /// Methods written in the script's language for every `trait` object, like extension methods.
+    /// `source` gives an object of functions in JS, like `({ twice() { ... } })`, or returns a table
+    /// of them in Lua. Each gets the object as `this` or `self`. They can't replace the trait's own.
+    pub fn extend(self: Script, types: *const Module, trait: []const u8, source: []const u8) Error!void {
+        return self.vtable.extend(self.ptr, types, trait, source);
     }
 
     /// As a task so it can await at the top, then pumps.
@@ -212,8 +221,11 @@ pub const Script = struct {
             fn module_(p: *anyopaque, name: []const u8, exports: []const Export) Error!void {
                 return self_(p).module(name, exports);
             }
-            fn globals_(p: *anyopaque, roots: []const Export) Error!void {
-                return self_(p).globals(roots);
+            fn namespaces_(p: *anyopaque, name: []const u8, roots: []const Export, globals: bool) Error!void {
+                return self_(p).namespaces(name, roots, globals);
+            }
+            fn extend_(p: *anyopaque, s: *const Module, trait: []const u8, source: []const u8) Error!void {
+                return self_(p).extend(s, trait, source);
             }
             fn run_(p: *anyopaque, source: []const u8, name: []const u8) Error!void {
                 return self_(p).run(source, name);
@@ -268,7 +280,8 @@ pub const Script = struct {
                 .schema = schema_,
                 .expose = expose_,
                 .module = module_,
-                .globals = globals_,
+                .namespaces = namespaces_,
+                .extend = extend_,
                 .run = run_,
                 .eval = eval_,
                 .take = take_,

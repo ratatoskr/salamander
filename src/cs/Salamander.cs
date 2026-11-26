@@ -471,6 +471,36 @@ public static class Declared
     /// <summary>Slot slot of the vtable at the start of obj.</summary>
     public static unsafe nuint Virtual(void* obj, int slot) => (*(nuint**)obj)[slot];
 }
+
+/// <summary>
+/// What a hooked handler's first argument reads: the function as it was and the hook's context. The
+/// host fills it once the hook's made, before anything calls the handler.
+/// </summary>
+public sealed class HookCell
+{
+    public nuint Original;
+    public nuint Context;
+}
+
+/// <summary>
+/// A function a schema declares, like a game's, as a value: its name, and handlers of its type. Each
+/// generated one is under its owner's Fns, like Player.Fns.Heal. Handler takes its arguments, and
+/// Hooked the hook's details first.
+/// </summary>
+public abstract class DeclaredFunction<Handler, Hooked>(string name) where Handler : Delegate where Hooked : Delegate
+{
+    /// <summary>Its full name, like Game.Player.heal.</summary>
+    public string Name { get; } = name;
+
+    /// <summary>Where it is, found by name the first time.</summary>
+    public nuint Address() => Declared.Address(Name);
+
+    /// <summary>A function value of its type calling handler, held till the host lets it go.</summary>
+    public abstract AnyObject Lower(Handler handler);
+
+    /// <summary>The same for a handler wanting the hook's details first, which it reads from cell.</summary>
+    public abstract AnyObject Lower(Hooked handler, HookCell cell);
+}
 /// <summary>Turns promises into tasks and back.</summary>
 public static unsafe class Promises
 {

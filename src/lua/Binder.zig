@@ -458,6 +458,8 @@ pub fn pushBuiltin(b: *Binder, l: *State) void {
         .{ "save", builtinSaveC },
         .{ "edit", builtinEditC },
         .{ "load", builtinLoadC },
+        .{ "nameOf", builtinNameOfC },
+        .{ "params", builtinParamsC },
     };
     c.lua_createtable(l, 0, list.len);
     const t = lua.top(l);
@@ -619,7 +621,8 @@ fn fnCallC(l_: ?*State) callconv(.c) c_int {
 }
 
 fn signatureArg(b: *Binder, l: *State, idx: c_int) Error!script.Core(Binder).Signature {
-    const text = lua.toString(l, idx) orelse return b.fail(l, "expected a signature, like `fn i32 (u32 a)`", .{});
+    // A declared function stands for its own signature
+    const text = declaredName(l, idx) orelse lua.toString(l, idx) orelse return b.fail(l, "expected a signature, like `fn i32 (u32 a)`", .{});
     var diag: Schema.Diagnostic = .{};
     return b.core.signature(text, &diag) catch |e| switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -636,6 +639,7 @@ fn builtinFnC(l_: ?*State) callconv(.c) c_int {
 }
 
 /// `fn(signature, f)` types `f`, so native code taking an object gets a function value of that type.
+/// A declared function works as its signature too.
 fn builtinFn(b: *Binder, l: *State) Error!c_int {
     if (lua.typeOf(l, 2) != c.LUA_TFUNCTION) return b.fail(l, "fn takes a signature and a function", .{});
     const sig = try b.signatureArg(l, 1);
@@ -646,6 +650,72 @@ fn builtinFn(b: *Binder, l: *State) Error!c_int {
     c.lua_rawseti(l, -2, 2);
     c.luaL_setmetatable(l, lua.cstr(fn_name));
     return 1;
+}
+
+/// The full name of the declared function at `idx`, like `Kai.Player.heal`, if it's one.
+fn declaredName(l: *State, idx: c_int) ?[]const u8 {
+    if (lua.typeOf(l, idx) != c.LUA_TFUNCTION or c.lua_tocfunction(l, idx) != callDeclaredC) return null;
+    _ = c.lua_getupvalue(l, idx, 2) orelse return null;
+    defer lua.pop(l, 1);
+    // Upvalues keep it alive, so the slice outlives the pop
+    return lua.toString(l, -1);
+}
+
+/// `nameOf(f)`, the full name of a declared function like `Kai.Player.heal`, or nil.
+fn builtinNameOfC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    if (declaredName(l, 1)) |n| lua.pushString(l, n) else c.lua_pushnil(l);
+    return 1;
+}
+
+/// `params(f)`, the names of a Lua function's parameters, in order.
+fn builtinParamsC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    const b: *Binder = @ptrCast(@alignCast(c.lua_touserdata(l, lua.upvalue(1))));
+    if (lua.typeOf(l, 1) != c.LUA_TFUNCTION) return b.raise(l, b.fail(l, "params takes a function", .{}));
+    lua.newTable(l);
+    const out = lua.top(l);
+    var i: c_int = 1;
+    while (true) : (i += 1) {
+        c.lua_pushvalue(l, 1);
+        const name = c.lua_getlocal(l, null, i) orelse {
+            lua.pop(l, 1);
+            break;
+        };
+        lua.pop(l, 1);
+        lua.pushString(l, std.mem.span(name));
+        c.lua_rawseti(l, out, i);
+    }
+    return 1;
+}
+
+/// Puts each function in the table at `idx` on every `t` object, leaving its own methods be.
+pub fn extend(b: *Binder, l: *State, t: *Trait, idx: c_int) Error!void {
+    if (t.sig != null) return b.fail(l, "a fn value's type can't get methods", .{});
+    if (lua.typeOf(l, idx) != c.LUA_TTABLE) return b.fail(l, "extend takes a table of functions", .{});
+    if (c.lua_checkstack(l, 6) == 0) return error.OutOfMemory;
+    const from = c.lua_absindex(l, idx);
+    lua.pushRef(l, t.lang.methods);
+    const methods = lua.top(l);
+    defer lua.pop(l, 1);
+    c.lua_pushnil(l);
+    while (c.lua_next(l, from) != 0) {
+        if (lua.typeOf(l, -2) != c.LUA_TSTRING or lua.typeOf(l, -1) != c.LUA_TFUNCTION) {
+            lua.pop(l, 1);
+            continue;
+        }
+        c.lua_pushvalue(l, -2);
+        if (c.lua_rawget(l, methods) != c.LUA_TNIL) {
+            // The table still holds the key, so its text stays good
+            const name = lua.toString(l, -3) orelse "?";
+            lua.pop(l, 3);
+            return b.fail(l, "{s} already has {s}", .{ t.decl.name, name });
+        }
+        lua.pop(l, 1);
+        c.lua_pushvalue(l, -2);
+        c.lua_insert(l, -2);
+        c.lua_rawset(l, methods);
+    }
 }
 
 fn builtinNativeC(l_: ?*State) callconv(.c) c_int {
@@ -772,38 +842,36 @@ fn callDeclaredC(l_: ?*State) callconv(.c) c_int {
     return b.callDeclared(l, name, 1) catch |e| b.raise(l, e);
 }
 
-// Globals: each namespace at the top, like `Wraith`, and what `[Root]` objects give
+// Namespaces: each one at the top, like `Wraith`, and what `[Root]` objects give
 
-/// Each namespace at the top of what's loaded, like `Wraith` and `Kai`, as a global with what's in
-/// it. Gives the name of one that would hide a global Lua has already, copied into `clash`,
-/// setting none.
-pub fn schemaGlobals(b: *Binder, l: *State, clash: []u8) Error!?[]const u8 {
+/// The namespaces at the top of the table at `all`, from `pushSchema`, as globals. Gives the name of
+/// one that would hide a global Lua has already, copied into `clash`, setting none.
+pub fn globalsFrom(b: *Binder, l: *State, all: c_int, clash: []u8) Error!?[]const u8 {
+    _ = b;
     if (c.lua_checkstack(l, 8) == 0) return error.OutOfMemory;
-    var arena: std.heap.ArenaAllocator = .init(b.core.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var names: std.ArrayList([:0]const u8) = .empty;
-    var it = b.core.declaring();
-    while (it.next()) |s| {
-        for (s.types) |t| if ((t.kind == .@"struct" or t.kind == .@"enum") and !t.nested) try addRoot(&names, a, t.name);
-        for (s.functions) |f| try addRoot(&names, a, f.name);
-        for (s.statics) |v| if (Schema.namespaceEnd(v.name) != null) try addRoot(&names, a, v.name);
-    }
-    for (names.items) |n| {
-        const kind = c.lua_getglobal(l, lua.cstr(n));
+    const at = c.lua_absindex(l, all);
+    _ = c.lua_rawgeti(l, c.LUA_REGISTRYINDEX, c.LUA_RIDX_GLOBALS);
+    const g = lua.top(l);
+    defer lua.pop(l, 1);
+    c.lua_pushnil(l);
+    while (c.lua_next(l, at) != 0) {
         lua.pop(l, 1);
-        if (kind == c.LUA_TNIL) continue;
-        const len = @min(n.len, clash.len);
-        @memcpy(clash[0..len], n[0..len]);
-        return clash[0..len];
+        c.lua_pushvalue(l, -1);
+        const kind = c.lua_rawget(l, g);
+        lua.pop(l, 1);
+        if (kind == c.LUA_TNIL or lua.typeOf(l, -1) != c.LUA_TSTRING) continue;
+        const n = lua.toString(l, -1).?;
+        const used = @min(n.len, clash.len);
+        @memcpy(clash[0..used], n[0..used]);
+        lua.pop(l, 1);
+        return clash[0..used];
     }
-    try b.pushSchema(l);
-    const all = lua.top(l);
-    for (names.items) |n| {
-        _ = lua.rawGet(l, all, n);
-        c.lua_setglobal(l, lua.cstr(n));
+    c.lua_pushnil(l);
+    while (c.lua_next(l, at) != 0) {
+        c.lua_pushvalue(l, -2);
+        c.lua_insert(l, -2);
+        c.lua_rawset(l, g);
     }
-    lua.pop(l, 1);
     return null;
 }
 
@@ -814,17 +882,15 @@ fn addRoot(out: *std.ArrayList([:0]const u8), a: std.mem.Allocator, name: []cons
     try out.append(a, try a.dupeSentinel(u8, root, 0));
 }
 
-/// A `[Root]` object of `trait` in `m`. Each accessor, like `tweaks()`, is a function on its
-/// namespace's global, like `Wraith.tweaks()`, and each trait one gives has `instance()` the same.
-/// So does the root's own trait, giving it.
-pub fn exposeRoot(b: *Binder, l: *State, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) Error!void {
+/// A `[Root]` object of `trait` in `m`, on the namespaces in the table at `all`. Each accessor, like
+/// `tweaks()`, is a function on its namespace, like `Wraith.tweaks()`, and each trait one gives has
+/// `instance()` the same. So does the root's own trait, giving it.
+pub fn exposeRoot(b: *Binder, l: *State, all: c_int, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) Error!void {
     if (c.lua_checkstack(l, 12) == 0) return error.OutOfMemory;
+    const g = c.lua_absindex(l, all);
     const t = b.trait(m, trait_name) catch |e| return b.traitFailed(l, e, trait_name);
     try b.wrap(l, t, obj);
     const root = lua.top(l);
-    defer lua.pop(l, 1);
-    _ = c.lua_rawgeti(l, c.LUA_REGISTRYINDEX, c.LUA_RIDX_GLOBALS);
-    const g = lua.top(l);
     defer lua.pop(l, 1);
     const s = m.schema();
     const decl = s.findTrait(trait_name) orelse return;
@@ -943,16 +1009,59 @@ fn fillSchema(b: *Binder, l: *State, all: c_int, s: Schema) Error!void {
             lua.pushClosure(l, classAtC, 2);
             lua.rawSet(l, class, "at");
         } else lua.pop(l, 1);
+        const st = t.kind.@"struct";
+        for (st.methods) |m| if (m.virtual == null) {
+            const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ t.name, m.name }) catch continue;
+            try b.addressIn(l, class, m.name, full);
+        };
+        for (st.statics) |v| {
+            const full = std.fmt.bufPrint(&buf, "{s}.{s}", .{ t.name, v.name }) catch continue;
+            try b.addressIn(l, class, v.name, full);
+        }
         lua.pop(l, 1);
     }
     for (s.functions) |f| {
         const end = Schema.namespaceEnd(f.name);
         if (end) |e| try b.pushTableIn(l, all, f.name[0..e]) else c.lua_pushvalue(l, all);
         const in = lua.top(l);
+        const leaf = if (end) |e| f.name[e + 1 ..] else f.name;
         b.pushDeclared(l, f.name);
-        lua.rawSet(l, in, if (end) |e| f.name[e + 1 ..] else f.name);
+        lua.rawSet(l, in, leaf);
+        try b.addressIn(l, in, leaf, f.name);
         lua.pop(l, 1);
     }
+    for (s.statics) |v| {
+        const end = Schema.namespaceEnd(v.name);
+        if (end) |e| try b.pushTableIn(l, all, v.name[0..e]) else c.lua_pushvalue(l, all);
+        try b.addressIn(l, lua.top(l), if (end) |e| v.name[e + 1 ..] else v.name, v.name);
+        lua.pop(l, 1);
+    }
+}
+
+/// `addresses[leaf]()` on the table at `holder`, where `full` is, like Zig's and C#'s.
+fn addressIn(b: *Binder, l: *State, holder: c_int, leaf: []const u8, full: []const u8) Error!void {
+    if (c.lua_checkstack(l, 4) == 0) return error.OutOfMemory;
+    const at = c.lua_absindex(l, holder);
+    if (lua.rawGet(l, at, "addresses") != c.LUA_TTABLE) {
+        lua.pop(l, 1);
+        lua.newTable(l);
+        c.lua_pushvalue(l, -1);
+        lua.rawSet(l, at, "addresses");
+    }
+    c.lua_pushlightuserdata(l, b);
+    lua.pushString(l, full);
+    lua.pushClosure(l, addressC, 2);
+    lua.rawSet(l, lua.top(l) - 1, leaf);
+    lua.pop(l, 1);
+}
+
+fn addressC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    const b = upBinder(l);
+    const name = lua.toString(l, lua.upvalue(2)).?;
+    const at = b.core.addressOf(name) catch |e| return b.raise(l, b.locateFailed(l, name, e));
+    c.lua_pushinteger(l, @bitCast(@as(u64, at)));
+    return 1;
 }
 
 /// Pushes the table at `path` under `all`, like `Scene.Node`, made with any on the way if they're

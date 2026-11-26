@@ -21,11 +21,13 @@ pub const isVoid = core.isVoid;
 pub const memory = @import("memory.zig");
 pub const views = @import("views.zig");
 pub const engine = @import("engine.zig");
+pub const params = @import("params.zig").params;
 
 test {
     _ = core;
     _ = memory;
     _ = views;
     _ = engine;
+    _ = @import("params.zig");
     _ = @import("Gate.zig");
 }

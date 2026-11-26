@@ -21,27 +21,44 @@ const Use = enum { out, in, view, field };
 /// `World`, with struct classes, enum values, functions, statics, roots' accessors like
 /// `Wraith.tweaks()`, and `instance()` on the traits those give and on the roots. `singletons` are
 /// whole trait names the host gives one of on their own, like `Freecam.Camera`, which scripts get
-/// from `Freecam.camera()` and `Freecam.Camera.instance()`.
-pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8) Error!void {
+/// from `Freecam.camera()` and `Freecam.Camera.instance()`. With `module`, they're on what
+/// `require(module)` gives instead of globals.
+pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8, module: ?[]const u8) Error!void {
     types.singletons = singletons;
     defer types.singletons = &.{};
     const live: types.Live = .init(s);
-    try w.writeAll("---@meta\n" ++ header);
+    if (module) |m| try w.print("---@meta {s}\n" ++ header, .{m}) else try w.writeAll("---@meta\n" ++ header);
     var all: types.Entries = .{ .s = s };
     while (all.next()) |e| if (e.isType()) try declareType(w, s, source, &live, e);
     all = .{ .s = s };
     while (all.next()) |e| if (e.holds(s)) try table(w, s, source, fullName(e));
     try namespaceTables(w, s, source, "");
 
+    if (module) |m| {
+        try w.print("---@class {s}\n", .{m});
+        all = .{ .s = s };
+        while (all.next()) |e| if (e.parent.len == 0 and e.isValue(s) and (e.what == .type or e.what == .trait)) try field(w, s, e.leaf);
+        var tops: types.Children = .init(s, "", .value);
+        while (tops.next()) |ns| if (types.holder(s, ns) == null) try field(w, s, ns);
+        try w.writeAll("local m = {}\n\n");
+    }
+    const on = if (module != null) "m" else "";
     all = .{ .s = s };
     while (all.next()) |e| if (e.parent.len == 0 and e.isValue(s)) switch (e.what) {
-        .function, .accessor => |m| try function(w, s, source, m.*, "", e.leaf),
-        .singleton => |t| try singleton(w, t, ""),
-        .type, .trait => try global(w, s, e.leaf),
+        .function, .accessor => |m| try function(w, s, source, m.*, on, e.leaf),
+        .singleton => |t| try singleton(w, t, on),
+        .type, .trait => if (module == null) try global(w, s, e.leaf),
         .static => {},
     };
+    if (module != null) return w.writeAll("return m\n");
     var tops: types.Children = .init(s, "", .value);
     while (tops.next()) |ns| if (types.holder(s, ns) == null) try global(w, s, ns);
+}
+
+fn field(w: *Writer, s: Schema, name: []const u8) Error!void {
+    try w.print("---@field {s} ", .{name});
+    try tableName(w, s, name);
+    try w.writeByte('\n');
 }
 
 /// The function giving a singleton of `t` on the table `on`, or a global for "".
@@ -153,7 +170,27 @@ fn table(w: *Writer, s: Schema, source: []const u8, path: []const u8) Error!void
         .singleton => |t| try singleton(w, t, "c"),
         else => {},
     };
+    try addresses(w, s, path, h);
     try w.writeAll("end\n\n");
+}
+
+/// `c.addresses`, where each function and static in `path` is, like Zig's and C#'s.
+fn addresses(w: *Writer, s: Schema, path: []const u8, h: ?Entry) Error!void {
+    var started = false;
+    if (h) |e| if (e.what == .type and e.what.type.kind == .@"struct") {
+        const st = e.what.type.kind.@"struct";
+        for (st.methods) |m| if (m.virtual == null) try addressLine(w, &started, m.name);
+        for (st.statics) |v| try addressLine(w, &started, v.name);
+    };
+    var all: types.Entries = .{ .s = s };
+    while (all.next()) |e| if (e.isValue(s) and std.mem.eql(u8, e.parent, path) and (e.what == .function or e.what == .static)) try addressLine(w, &started, e.leaf);
+}
+
+fn addressLine(w: *Writer, started: *bool, name: []const u8) Error!void {
+    if (!started.*) try w.writeAll("---Where each is, found by name the first time it's asked for.\nc.addresses = {}\n\n");
+    started.* = true;
+    try w.writeAll("---@return integer\n");
+    if (keywords.has(name)) try w.print("c.addresses[\"{s}\"] = function() end\n\n", .{name}) else try w.print("function c.addresses.{s}() end\n\n", .{name});
 }
 
 /// `salamander`, as the module and a global.
@@ -170,18 +207,29 @@ pub fn builtins(w: *Writer) Error!void {
         \\---@class salamander
         \\local salamander = {}
         \\
-        \\---`f`, typed by `signature` like `"fn i32 (i32 a)"` or a declared name like `"Player.heal"`, so native code taking an object gets it as that function type.
+        \\---`f`, typed by `signature` like `"fn i32 (i32 a)"`, a declared name like `"Player.heal"` or a declared function itself, so native code taking an object gets it as that function type.
         \\---@generic F: function
-        \\---@param signature string
+        \\---@param signature string|F
         \\---@param f F
         \\---@return F
         \\function salamander.fn(signature, f) end
         \\
-        \\---The native function at `address`, callable, typed by `signature` like `fn` takes.
-        \\---@param signature string
+        \\---The native function at `address`, callable, typed by `signature` like `fn` takes, or like a declared function given for it.
+        \\---@generic F: function
+        \\---@param signature string|F
         \\---@param address integer
-        \\---@return function
+        \\---@return F
         \\function salamander.native(signature, address) end
+        \\
+        \\---The full name of a declared function, like `"Kai.Player.heal"`, or nil for anything else.
+        \\---@param f any
+        \\---@return string|nil
+        \\function salamander.nameOf(f) end
+        \\
+        \\---A Lua function's parameter names, in order.
+        \\---@param f function
+        \\---@return string[]
+        \\function salamander.params(f) end
         \\
         \\---A live view of `type`, like `"Player"` or `"u32[4]"`, at `address`. Nil at 0.
         \\---@param type string
@@ -522,7 +570,26 @@ fn expectPieces(text: []const u8, want: []const []const u8) !void {
 fn generate(source: []const u8, options: @import("salamander_schema").Options, singletons: []const []const u8, out: *Writer.Allocating) !void {
     var parsed = try @import("salamander_schema").parse(testing.allocator, source, options, null);
     defer parsed.deinit();
-    try globals(&out.writer, parsed.schema, source, singletons);
+    try globals(&out.writer, parsed.schema, source, singletons, null);
+}
+
+test "as a module, what's at the top is on what require gives" {
+    const source =
+        \\namespace Game {
+        \\    struct Box { u32 n; }
+        \\    [Root] trait App { u32 version(); }
+        \\}
+    ;
+    var parsed = try @import("salamander_schema").parse(testing.allocator, source, .{}, null);
+    defer parsed.deinit();
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try globals(&out.writer, parsed.schema, source, &.{}, "game");
+    const text = out.written();
+    try testing.expect(std.mem.startsWith(u8, text, "---@meta game\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "---@class game\n---@field Game Game\nlocal m = {}\n") != null);
+    try testing.expect(std.mem.endsWith(u8, text, "return m\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "\nGame = {}") == null);
 }
 
 test "traits, plain types and docs, with a root at the top" {

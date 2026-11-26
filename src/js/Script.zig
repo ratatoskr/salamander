@@ -23,6 +23,9 @@ queue: rt.Queue,
 resolver: ?engine.Resolver,
 report: ?engine.Report,
 natives: engine.Natives = .{},
+/// What `namespaces` made, by its module's name.
+ns_name: std.ArrayList(u8) = .empty,
+ns_value: Value = qjs.undefined_value,
 /// What `run` ran, for `take`.
 main: ?*c.JSModuleDef = null,
 /// What `require` ran, by name, as each one's `module`.
@@ -77,6 +80,8 @@ pub fn create(options: engine.Options) !engine.Script {
 pub fn deinit(self: *Script) void {
     const ctx = self.ctx;
     c.JS_FreeValue(ctx, self.required);
+    c.JS_FreeValue(ctx, self.ns_value);
+    self.ns_name.deinit(self.gpa);
     self.binder.deinit();
     for (self.rejections.items) |r| {
         c.JS_FreeValue(ctx, r[0]);
@@ -222,19 +227,54 @@ pub fn module(self: *Script, name: []const u8, exports: []const engine.Export) e
     try self.natives.add(self.gpa, name, exports);
 }
 
-pub fn globals(self: *Script, roots: []const engine.Export) engine.Error!void {
+pub fn namespaces(self: *Script, name: []const u8, roots: []const engine.Export, globals: bool) engine.Error!void {
     self.binder.core.enter();
     defer self.binder.core.leave();
-    var buf: [128]u8 = undefined;
-    const clash = self.binder.schemaGlobals(&buf) catch |err| return switch (err) {
+    const all = self.binder.schemaObject() catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Exception => self.keepPending(),
     };
-    if (clash) |n| return self.failed("the namespace {s} would hide JavaScript's own {s}", .{ n, n });
-    for (roots) |r| self.binder.exposeRoot(r.schema, r.trait, r.obj) catch |err| return switch (err) {
+    var kept = false;
+    defer if (!kept) c.JS_FreeValue(self.ctx, all);
+    for (roots) |r| self.binder.exposeRoot(all, r.schema, r.trait, r.obj) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Exception => self.keepPending(),
     };
+    if (globals) {
+        var buf: [128]u8 = undefined;
+        const clash = self.binder.globalsFrom(all, &buf) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Exception => self.keepPending(),
+        };
+        if (clash) |n| return self.failed("the namespace {s} would hide JavaScript's own {s}", .{ n, n });
+    }
+    self.ns_name.clearRetainingCapacity();
+    try self.ns_name.appendSlice(self.gpa, name);
+    c.JS_FreeValue(self.ctx, self.ns_value);
+    self.ns_value = all;
+    kept = true;
+}
+
+pub fn extend(self: *Script, s: *const script.Module, trait: []const u8, source: []const u8) engine.Error!void {
+    self.binder.core.enter();
+    defer self.binder.core.leave();
+    const t = self.binder.trait(s, trait) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Exception => self.keepPending(),
+    };
+    var name_buf: [256:0]u8 = undefined;
+    const name = std.fmt.bufPrintSentinel(&name_buf, "{s} methods", .{trait}, 0) catch return error.OutOfMemory;
+    const methods = self.eval_(source, qjs.cstr(name), c.JS_EVAL_TYPE_GLOBAL);
+    defer c.JS_FreeValue(self.ctx, methods);
+    if (c.JS_IsException(methods)) return self.keepPending();
+    self.binder.extend(t, methods) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Exception => self.keepPending(),
+    };
+}
+
+fn isNamespaces(self: *Script, name: []const u8) bool {
+    return self.ns_name.items.len > 0 and std.mem.eql(u8, name, self.ns_name.items);
 }
 
 pub fn run(self: *Script, source: []const u8, name: []const u8) engine.Error!void {
@@ -375,7 +415,7 @@ fn normalize(ctx_: ?*qjs.Context, base_: [*c]const u8, name_: [*c]const u8, opaq
     const self: *Script = @ptrCast(@alignCast(opaque_.?));
     const base = std.mem.span(@as([*:0]const u8, @ptrCast(base_)));
     const name = std.mem.span(@as([*:0]const u8, @ptrCast(name_)));
-    if (self.natives.find(name) != null or std.mem.eql(u8, name, Binder.builtin_module) or std.mem.eql(u8, name, Binder.schema_module)) return c.js_strdup(ctx, name_);
+    if (self.isNamespaces(name) or self.natives.find(name) != null or std.mem.eql(u8, name, Binder.builtin_module) or std.mem.eql(u8, name, Binder.schema_module)) return c.js_strdup(ctx, name_);
     const r = self.resolver orelse {
         _ = qjs.throw(ctx, "can't import '{s}': there's no module by that name", .{name});
         return null;
@@ -393,6 +433,19 @@ fn load(ctx_: ?*qjs.Context, name_: [*c]const u8, opaque_: ?*anyopaque) callconv
     const ctx = ctx_.?;
     const self: *Script = @ptrCast(@alignCast(opaque_.?));
     const name = std.mem.span(@as([*:0]const u8, @ptrCast(name_)));
+    if (self.isNamespaces(name)) {
+        const m = c.JS_NewCModule(ctx, name_, initNamespaces) orelse return null;
+        var tab: [*c]c.JSPropertyEnum = null;
+        var len: u32 = 0;
+        if (c.JS_GetOwnPropertyNames(ctx, &tab, &len, self.ns_value, c.JS_GPN_STRING_MASK | c.JS_GPN_ENUM_ONLY) < 0) return null;
+        defer c.JS_FreePropertyEnum(ctx, tab, len);
+        for (tab[0..len]) |p| {
+            const key = c.JS_AtomToCString(ctx, p.atom);
+            defer c.JS_FreeCString(ctx, key);
+            _ = c.JS_AddModuleExport(ctx, m, key);
+        }
+        return m;
+    }
     if (self.natives.find(name)) |n| {
         const m = c.JS_NewCModule(ctx, name_, initNative) orelse return null;
         for (n.exports) |e| {
@@ -484,6 +537,7 @@ fn require(ctx_: ?*qjs.Context, this: Value, argc: c_int, argv: [*c]Value) callc
 /// A native module, the schema or the builtins as one object, like importing all of it. Made once.
 /// Null if `name` is none of them.
 fn requireNative(self: *Script, ctx: *qjs.Context, name: []const u8) ?Value {
+    if (self.isNamespaces(name)) return c.JS_DupValue(ctx, self.ns_value);
     const native = self.natives.find(name);
     const is_schema = std.mem.eql(u8, name, Binder.schema_module);
     const is_builtin = std.mem.eql(u8, name, Binder.builtin_module);
@@ -549,6 +603,21 @@ fn initSchema(ctx_: ?*qjs.Context, m: ?*c.JSModuleDef) callconv(.c) c_int {
         }
     }
     return c.JS_SetModuleExport(ctx, m, qjs.cstr("default"), all);
+}
+
+fn initNamespaces(ctx_: ?*qjs.Context, m: ?*c.JSModuleDef) callconv(.c) c_int {
+    const ctx = ctx_.?;
+    const self = of(ctx);
+    var tab: [*c]c.JSPropertyEnum = null;
+    var len: u32 = 0;
+    if (c.JS_GetOwnPropertyNames(ctx, &tab, &len, self.ns_value, c.JS_GPN_STRING_MASK | c.JS_GPN_ENUM_ONLY) < 0) return -1;
+    defer c.JS_FreePropertyEnum(ctx, tab, len);
+    for (tab[0..len]) |p| {
+        const key = c.JS_AtomToCString(ctx, p.atom);
+        defer c.JS_FreeCString(ctx, key);
+        if (c.JS_SetModuleExport(ctx, m, key, c.JS_GetProperty(ctx, self.ns_value, p.atom)) < 0) return -1;
+    }
+    return 0;
 }
 
 fn initNative(ctx_: ?*qjs.Context, m: ?*c.JSModuleDef) callconv(.c) c_int {

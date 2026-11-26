@@ -25,17 +25,23 @@ const Use = enum {
     field,
 };
 
-/// Everything in `s` as global declarations, for a file without imports. Types go in namespaces,
+/// Everything in `s` as global declarations, for a file without imports, or as what `module` exports,
+/// like `import { Wraith } from "wraith"`. Types go in namespaces,
 /// like `World.Counter`, and each namespace at the top is also a value with what's in it while
 /// scripts run: struct classes, enum values, functions, statics, roots' accessors like
 /// `Wraith.tweaks()`, and `instance()` on the traits those give and on the roots. `singletons` are
 /// whole trait names the host gives one of on their own, like `Freecam.Camera`, which scripts get
 /// from `Freecam.camera()` and `Freecam.Camera.instance()`.
-pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8) Error!void {
+pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8, module: ?[]const u8) Error!void {
     types.singletons = singletons;
     defer types.singletons = &.{};
+    // An ambient module's already declared, so what's in it isn't again
+    declare_word = if (module == null) "declare " else "";
+    defer declare_word = "declare ";
     const live: types.Live = .init(s);
     try w.writeAll(header);
+    if (module) |m| try w.print("declare module \"{s}\" {{\n", .{m});
+    defer if (module != null) w.writeAll("}\n") catch {};
     var all: types.Entries = .{ .s = s };
     while (all.next()) |e| if (e.parent.len == 0 and e.isType()) try declareType(w, s, source, &live, e, 0);
     var namespaces: types.Children = .init(s, "", .type);
@@ -45,13 +51,13 @@ pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []
     while (all.next()) |e| if (e.parent.len == 0 and e.isValue(s)) switch (e.what) {
         .function, .accessor => |m| {
             try methodDoc(w, s, source, m.*, "");
-            try w.print("declare function {s}", .{e.leaf});
+            try w.print("{s}function {s}", .{ declare_word, e.leaf });
             try signature(w, s, m.signature, m.async);
             try w.writeAll(";\n");
         },
-        .singleton => |t| try singleton(w, t, "", "declare function "),
+        .singleton => |t| try singleton(w, t, "", if (module == null) "declare function " else "function "),
         .type, .trait => {
-            try w.print("declare const {s}: ", .{e.leaf});
+            try w.print("{s}const {s}: ", .{ declare_word, e.leaf });
             try object(w, s, source, e.leaf, 0);
             try w.writeAll(";\n");
         },
@@ -59,11 +65,14 @@ pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []
     };
     var values: types.Children = .init(s, "", .value);
     while (values.next()) |ns| if (types.holder(s, ns) == null) {
-        try w.print("declare const {s}: ", .{ns});
+        try w.print("{s}const {s}: ", .{ declare_word, ns });
         try object(w, s, source, ns, 0);
         try w.writeAll(";\n");
     };
 }
+
+/// What goes before what's at the top, "" in a module.
+var declare_word: []const u8 = "declare ";
 
 const spaces: [64]u8 = @splat(' ');
 
@@ -74,7 +83,7 @@ fn indentOf(depth: usize) []const u8 {
 /// `namespace` with the types in `path`, and the namespaces in it.
 fn typeNamespace(w: *Writer, s: Schema, source: []const u8, live: *const types.Live, path: []const u8, depth: usize) Error!void {
     const indent = indentOf(depth);
-    try w.print("{s}{s}namespace ", .{ indent, if (depth == 0) "declare " else "" });
+    try w.print("{s}{s}namespace ", .{ indent, if (depth == 0) declare_word else "" });
     try Schema.writeFlatName(w, types.leafOf(path));
     try w.writeAll(" {\n");
     var all: types.Entries = .{ .s = s };
@@ -128,8 +137,22 @@ fn object(w: *Writer, s: Schema, source: []const u8, path: []const u8, depth: us
         .type => |t| try objectProperty(w, s, source, e.leaf, t.name, depth + 1),
         .trait => |t| try objectProperty(w, s, source, e.leaf, t.name, depth + 1),
     };
+
     var inner: types.Children = .init(s, path, .value);
     while (inner.next()) |ns| if (types.holder(s, ns) == null) try objectProperty(w, s, source, types.leafOf(ns), ns, depth + 1);
+    // A struct's class has its own already
+    const has_class_addresses = if (types.holder(s, path)) |h| h.what == .type and h.what.type.kind == .@"struct" and
+        h.what.type.kind.@"struct".methods.len + h.what.type.kind.@"struct".statics.len > 0 else false;
+    if (!has_class_addresses) {
+        var started = false;
+        all = .{ .s = s };
+        while (all.next()) |e| if (e.isValue(s) and std.mem.eql(u8, e.parent, path) and (e.what == .function or e.what == .static)) {
+            if (!started) try w.print("{s}/** Where each is, found by name the first time it's asked for. */\n{s}addresses: {{\n", .{ indent, indent });
+            started = true;
+            try addressLine(w, e.leaf, indent);
+        };
+        if (started) try w.print("{s}}};\n", .{indent});
+    }
     try w.print("{s}}}", .{indentOf(depth)});
 }
 
@@ -181,16 +204,33 @@ fn classMembers(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type
         try typeRef(w, s, v.type, .view);
         try w.writeAll(";\n");
     }
+    if (st.methods.len + st.statics.len == 0) return;
+    try w.print("{s}/** Where each is, found by name the first time it's asked for. */\n{s}addresses: {{\n", .{ indent, indent });
+    for (st.methods) |m| if (m.virtual == null) try addressLine(w, m.name, indent);
+    for (st.statics) |v| try addressLine(w, v.name, indent);
+    try w.print("{s}}};\n", .{indent});
+}
+
+fn addressLine(w: *Writer, name: []const u8, indent: []const u8) Error!void {
+    try w.print("{s}  ", .{indent});
+    try propertyName(w, name);
+    try w.writeAll("(): number;\n");
 }
 
 /// `salamander`, as the module and a global.
 pub fn builtins(w: *Writer) Error!void {
     try w.writeAll(header ++
         \\declare module "salamander" {
-        \\  /** `f`, typed by `signature` like `"fn i32 (i32 a)"` or a declared name like `"Player.heal"`, so native code taking an object gets it as that function type. */
-        \\  export function fn<F extends (...args: any[]) => any>(signature: string, f: F): F;
+        \\  /** `f`, typed by `signature` like `"fn i32 (i32 a)"`, a declared name like `"Player.heal"` or a declared function itself, so native code taking an object gets it as that function type. */
+        \\  export function fn<F extends (...args: any[]) => any>(signature: string | F, f: F): F;
+        \\  /** The native function at `address`, callable, typed like a declared function given for `signature`. */
+        \\  export function native<F extends (...args: any[]) => any>(signature: F, address: number | bigint): F;
         \\  /** The native function at `address`, callable, typed by `signature` like `fn` takes. */
         \\  export function native(signature: string, address: number | bigint): (...args: any[]) => any;
+        \\  /** The full name of a declared function, like `"Kai.Player.heal"`, or undefined for anything else. */
+        \\  export function nameOf(f: unknown): string | undefined;
+        \\  /** A function's parameter names, as written. One that isn't a plain name, like `{ a }`, is `""`. */
+        \\  export function params(f: (...args: any[]) => any): string[];
         \\  /** A live view of `type`, like `"Player"` or `"u32[4]"`, at `address`. Null at 0. */
         \\  export function at(type: string, address: number | bigint): any;
         \\  /** Where a view is. */
@@ -525,9 +565,30 @@ fn expectPieces(text: []const u8, want: []const []const u8) !void {
 }
 
 fn generate(source: []const u8, options: @import("salamander_schema").Options, singletons: []const []const u8, out: *Writer.Allocating) !void {
+    return generateIn(source, options, singletons, null, out);
+}
+
+fn generateIn(source: []const u8, options: @import("salamander_schema").Options, singletons: []const []const u8, module: ?[]const u8, out: *Writer.Allocating) !void {
     var parsed = try @import("salamander_schema").parse(testing.allocator, source, options, null);
     defer parsed.deinit();
-    try globals(&out.writer, parsed.schema, source, singletons);
+    try globals(&out.writer, parsed.schema, source, singletons, module);
+}
+
+test "as a module, what's at the top is exported without declare" {
+    const source =
+        \\namespace Game {
+        \\    struct Box { u32 n; }
+        \\    [Root] trait App { u32 version(); }
+        \\}
+    ;
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try generateIn(source, .{}, &.{}, "game", &out);
+    const text = out.written();
+    try expectPieces(text, &.{ "declare module \"game\" {\n", "namespace Game {", "const Game: {" });
+    try testing.expect(std.mem.indexOf(u8, text, "declare namespace") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "declare const") == null);
+    try testing.expect(std.mem.endsWith(u8, text, "}\n"));
 }
 
 test "traits, plain types and docs, with a root at the top" {
@@ -637,7 +698,7 @@ test "namespaces are globals, with a root's accessors and names in a trait's nam
         "  interface Vfs {\n    close(): void;\n  }",
         "  namespace Tweaks {\n    type Mode = number;",
         "    interface Definition {\n      id: string;\n      mode: Wraith.Tweaks.Mode | Wraith.Tweaks.ModeName;\n    }",
-        "declare const World: {\n  Counter: {\n    /** A live view of one at `address`. Null at 0. */\n    at(address: number | bigint): World.Counter | null;\n    main: World.Counter | null;\n  };",
+        "declare const World: {\n  Counter: {\n    /** A live view of one at `address`. Null at 0. */\n    at(address: number | bigint): World.Counter | null;\n    main: World.Counter | null;\n    /** Where each is, found by name the first time it's asked for. */\n    addresses: {\n      main(): number;\n    };\n  };",
         "  twice(n: number): number;\n  ticks: number;\n  Inner: {\n    Mode: {\n      readonly off: number;",
         "declare const Wraith: {\n  Tweaks: {\n    /** The one scripts are given. */\n    instance(): Wraith.Tweaks;\n    Mode: {\n      readonly off: number;\n      readonly toggle: number;\n    };\n    Definition: {",
         "  Api: {\n    /** The one scripts are given. */\n    instance(): Wraith.Api;\n  };\n  tweaks(): Wraith.Tweaks;\n};",
