@@ -3,6 +3,7 @@
 const writer = @import("write.zig");
 pub const write = writer.write;
 pub const Options = writer.Options;
+pub const Alias = writer.Alias;
 pub const Error = writer.Error;
 pub const core_prefix = writer.core_prefix;
 

@@ -71,12 +71,12 @@ float c_cam_speed(void) { return cam.speed; }
 uint32_t c_provide(sal_Host host) {
     sal_Owner *owner = sal_Host_owner(host, SAL_STR("c"));
     Freecam mine = { (uintptr_t)&cam, &cam_table };
-    return Freecam_provide(host, SAL_STR("c.cam"), 1, Freecam_own(host, mine, owner));
+    return sal_provide_Freecam(host, SAL_STR("c.cam"), 1, sal_own_Freecam(host, mine, owner));
 }
 
 /* Gets one back through the host, laid out like this header's version */
 float c_get_and_set(sal_Host host, float speed) {
-    Freecam f = Freecam_get(host, SAL_STR("c.cam"), 1);
+    Freecam f = sal_get_Freecam(host, SAL_STR("c.cam"), 1);
     if (!f.table) return -1;
     Freecam_setSpeed(f, speed);
     return cam.speed;

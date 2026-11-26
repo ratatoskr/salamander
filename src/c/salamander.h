@@ -93,7 +93,7 @@ typedef struct sal_object {
 } sal_object;
 
 /* The start of a table's initializer, for one of trait T's. */
-#define SAL_TABLE(T) .salamander_info = &T##_info, .salamander_owner = NULL
+#define SAL_TABLE(T) .salamander_info = &sal_info_##T, .salamander_owner = NULL
 
 #if defined(_MSC_VER) && !defined(__clang__)
 #  include <intrin.h>

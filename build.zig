@@ -242,14 +242,33 @@ fn csFilesWith(b: *std.Build, gen: *std.Build.Step.Compile, options: CsOptions) 
 }
 
 pub const CHeaderOptions = struct {
-    /// A `.sal` file.
-    source: std.Build.LazyPath,
+    /// A `.sal` file. Or use `folder`.
+    source: ?std.Build.LazyPath = null,
+    /// A folder of `.sal` files that make one schema, like a `schemas` folder.
+    folder: ?std.Build.LazyPath = null,
     /// Gives the schema its pointer size.
     target: std.Build.ResolvedTarget,
     /// What to `#include`.
     name: []const u8,
     /// Goes in front of every name, since C has no namespaces.
     prefix: []const u8 = "",
+    /// Tools' namespaces in scope in every file, like `&.{"wraith"}` so they can say `[Sig]`.
+    uses: []const []const u8 = &.{},
+    /// Where files that don't say a namespace go, like a plugin's own. Empty is the top.
+    namespace: []const u8 = "",
+    /// Annotations that stand for a static, like `wraith.Instance=Sig`, see `ZigOptions.instances`.
+    instances: []const []const u8 = &.{},
+    /// Namespaces every file uses the types of by their short names, like `&.{"Wraith"}`.
+    global_uses: []const []const u8 = &.{},
+    /// Like `freecam/=Freecam`, see `ZigOptions.file_namespaces`.
+    file_namespaces: []const []const u8 = &.{},
+    /// Other folders' `.sal` files, named `name/...`, like a dependency's.
+    with: []const ZigOptions.With = &.{},
+    /// What files starting with `prefix` declare comes from header `include`, made from them the
+    /// same way, which this one includes instead of writing them again.
+    aliases: []const Alias = &.{},
+
+    pub const Alias = struct { prefix: []const u8, include: []const u8 };
 };
 
 /// A folder with `salamander.h`, `salamander_core.h` and a header for `source`, for `addIncludePath`, like
@@ -276,9 +295,23 @@ fn cHeadersWith(b: *std.Build, gen: *std.Build.Step.Compile, base: std.Build.Laz
     const run = b.addRunArtifact(gen);
     run.addArg("c");
     const header = run.addOutputFileArg(options.name);
-    run.addFileArg(options.source);
+    if (options.folder) |f| {
+        run.addDirectoryArg(f);
+        trackSal(run, f);
+    } else run.addFileArg(options.source orelse @panic("cHeaders needs a source or a folder"));
     run.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{options.target.result.ptrBitWidth() / 8}) });
     if (options.prefix.len > 0) run.addArgs(&.{ "--prefix", options.prefix });
+    for (options.uses) |u| run.addArgs(&.{ "--use", u });
+    for (options.global_uses) |u| run.addArgs(&.{ "--global-use", u });
+    if (options.namespace.len > 0) run.addArgs(&.{ "--default-namespace", options.namespace });
+    for (options.file_namespaces) |f| run.addArgs(&.{ "--file-namespace", f });
+    for (options.instances) |i| run.addArgs(&.{ "--instance", i });
+    for (options.with) |w| {
+        run.addArgs(&.{ "--with", w.name });
+        run.addDirectoryArg(w.folder);
+        trackSal(run, w.folder);
+    }
+    for (options.aliases) |a| run.addArgs(&.{ "--alias", b.fmt("{s}={s}", .{ a.prefix, a.include }) });
     const files = b.addWriteFiles();
     _ = files.addCopyDirectory(base, "", .{});
     _ = files.addCopyFile(header, options.name);

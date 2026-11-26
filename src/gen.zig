@@ -11,7 +11,8 @@
 //! `--use NS` puts a tool's namespace in scope, like a `use` in every file.
 //! `--with NAME DIR` adds another folder's `.sal` files, named `NAME/...`, like a dependency's.
 //! `--alias PREFIX=MODULE` takes what files starting with PREFIX declare from the Zig module MODULE,
-//! like `--alias wraith/=wraith_api_zig`, so the types are the ones that module already has.
+//! like `--alias wraith/=wraith_api_zig`, so the types are the ones that module already has. For C
+//! it's a header to include, like `--alias wraith/=wraith.h`, and for C# a namespace.
 //! `--check` writes nothing and fails if the output isn't what it would write.
 
 const std = @import("std");
@@ -48,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var with: std.ArrayList([2][]const u8) = .empty;
     var aliases: std.ArrayList(salamander_zig.Alias) = .empty;
     var cs_aliases: std.ArrayList(salamander_cs.Alias) = .empty;
+    var c_aliases: std.ArrayList(salamander_c.Alias) = .empty;
     var instances: std.ArrayList(salamander_schema.InstanceTag) = .empty;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--pointer-size")) {
@@ -89,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
             const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return usage();
             try aliases.append(arena, .{ .prefix = spec[0..eq], .import = spec[eq + 1 ..] });
             try cs_aliases.append(arena, .{ .prefix = spec[0..eq], .namespace = spec[eq + 1 ..] });
+            try c_aliases.append(arena, .{ .prefix = spec[0..eq], .include = spec[eq + 1 ..] });
         } else return usage();
     }
 
@@ -115,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
     var out: std.Io.Writer.Allocating = .init(arena);
     const label = std.fs.path.basename(in_path);
     const written = if (is_c)
-        salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core }, &diag)
+        salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core, .source = source, .aliases = c_aliases.items }, &diag)
     else if (is_cs)
         salamander_cs.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .class = class, .core = core, .source = source, .aliases = cs_aliases.items }, &diag)
     else
@@ -188,7 +191,7 @@ fn readFolder(arena: std.mem.Allocator, io: std.Io, path: []const u8, prefix: []
 fn usage() error{Usage} {
     std.debug.print(
         \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]
-        \\       salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]
+        \\       salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--alias PREFIX=HEADER]... [--check]
         \\       salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]
         \\       salamander-gen bundle <out.sal> <in>
         \\<in> is a .sal file, or a folder of them that make one schema.

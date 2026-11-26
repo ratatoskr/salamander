@@ -1,6 +1,8 @@
 //! A schema as a C header over `salamander.h`, laid out by the same plan as Zig and checked with `_Static_assert`s.
 //! Ints, enums, error sets and bitfields are backing ints with `#define`d values, since C's own differ between compilers.
-//! Each trait gets its table, info and inline helpers.
+//! Each trait gets its table, info and inline helpers. Code a schema declares in existing code, like a
+//! game's `[Sig]` functions and statics, gets its full name to find it by and, for functions, a
+//! pointer type to call it through.
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
@@ -14,10 +16,21 @@ pub const Error = std.Io.Writer.Error || error{ OutOfMemory, NameClash };
 pub const Options = struct {
     /// Where it came from, for the header. Also names the include guard.
     label: []const u8 = "schema.sal",
+    /// What was parsed, so `aliases` can tell which file each thing's in.
+    source: []const u8 = "",
+    /// Files whose types come from another header, included instead of written again.
+    aliases: []const Alias = &.{},
     /// Goes in front of every name, since C has no namespaces.
     prefix: []const u8 = "",
     /// Writing the runtime's own `core.sal`, so it doesn't include itself.
     core: bool = false,
+};
+
+/// What files starting with `prefix` declare comes from `include`, like `wraith/` from `wraith.h`, made
+/// from those files with the same prefix.
+pub const Alias = struct {
+    prefix: []const u8,
+    include: []const u8,
 };
 
 /// The runtime's traits, from `core.sal`, have this in front.
@@ -72,6 +85,19 @@ const Gen = struct {
 
     fn fmt(g: *Gen, comptime f: []const u8, args: anytype) Error![]const u8 {
         return std.fmt.allocPrint(g.a, f, args);
+    }
+
+    /// Whether what's declared at `at` comes from an aliased header.
+    fn aliased(g: *const Gen, at: Schema.Pos) bool {
+        if (g.o.aliases.len == 0) return false;
+        const file_name = Schema.fileOf(g.o.source, at);
+        for (g.o.aliases) |a| if (std.mem.startsWith(u8, file_name, a.prefix)) return true;
+        return false;
+    }
+
+    fn aliasedType(g: *const Gen, n: []const u8) bool {
+        const t = g.s.findType(n) orelse return false;
+        return g.aliased(t.at);
     }
 
     fn claim(g: *Gen, n: []const u8) Error!void {
@@ -272,6 +298,12 @@ const Gen = struct {
             \\
         , .{ g.o.label, guard, guard });
         if (!g.o.core) try g.print("#include \"salamander_core.h\"\n", .{});
+        for (g.o.aliases, 0..) |a, i| {
+            const seen = for (g.o.aliases[0..i]) |b| {
+                if (std.mem.eql(u8, a.include, b.include)) break true;
+            } else false;
+            if (!seen) try g.print("#include \"{s}\"\n", .{a.include});
+        }
 
         const laid_out = for (s.types) |t| {
             if (t.kind == .@"struct" or t.kind == .@"union") break true;
@@ -279,59 +311,68 @@ const Gen = struct {
         if (laid_out) try g.print("\n_Static_assert(sizeof(void *) == {d}, \"these types are for {d}-bit code\");\n", .{ s.pointer_size, @as(usize, s.pointer_size) * 8 });
 
         // Named function types first, so their signatures keep their own names
-        for (s.types) |t| if (t.kind == .func) {
+        for (s.types) |t| if (t.kind == .func and !g.aliased(t.at)) {
             for (t.kind.func.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ t.name, p.name }));
             try g.collect(t.kind.func.ret, t.name);
             try g.fns.append(g.a, .{ .name = try g.name(t.name), .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func) });
         };
-        for (s.types) |t| {
+        for (s.types) |t| if (!g.aliased(t.at)) {
             try g.claim(try g.name(t.name));
             switch (t.kind) {
                 .@"struct", .@"union" => |st| for (st.fields) |f| try g.collect(f.type, try g.fmt("{s}_{s}", .{ t.name, f.name })),
                 else => {},
             }
-        }
-        for (s.traits) |*t| {
+        };
+        for (s.traits) |*t| if (!g.aliased(t.at)) {
             try g.claim(try g.name(t.name));
             for (t.methods) |m| {
                 for (m.signature.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}_{s}", .{ t.name, m.name, p.name }));
                 try g.collect(m.signature.ret, try g.fmt("{s}_{s}", .{ t.name, m.name }));
             }
+        };
+        for (s.constants) |k| if (!g.aliased(k.at)) try g.claim(try g.name(k.name));
+        for (s.types) |t| if (t.kind == .@"struct" and !g.aliased(t.at)) for (t.kind.@"struct".methods) |m| {
+            for (m.signature.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}_{s}", .{ t.name, m.name, p.name }));
+            try g.collect(m.signature.ret, try g.fmt("{s}_{s}", .{ t.name, m.name }));
+        };
+        for (s.functions) |m| {
+            for (m.signature.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ m.name, p.name }));
+            try g.collect(m.signature.ret, m.name);
         }
-        for (s.constants) |k| try g.claim(try g.name(k.name));
 
         // Everything with a name first, so order doesn't matter for pointers
         try g.print("\n", .{});
-        for (s.types) |t| switch (t.kind) {
+        for (s.types) |t| if (!g.aliased(t.at)) switch (t.kind) {
             .@"struct", .@"opaque" => try g.print("typedef struct {s} {s};\n", .{ try g.name(t.name), try g.name(t.name) }),
             .@"union" => try g.print("typedef union {s} {s};\n", .{ try g.name(t.name), try g.name(t.name) }),
             else => {},
         };
-        for (s.traits) |t| {
+        for (s.traits) |t| if (!g.aliased(t.at)) {
             const n = try g.name(t.name);
             try g.print("typedef struct {s} {s};\ntypedef struct {s}_table {s}_table;\n", .{ n, n, n, n });
-        }
+        };
         for (g.fns.items) |f| try g.print("typedef struct {s} {s};\ntypedef struct {s}_table {s}_table;\n", .{ f.name, f.name, f.name, f.name });
 
-        for (s.types) |*t| switch (t.kind) {
+        for (s.types) |*t| if (!g.aliased(t.at)) switch (t.kind) {
             .@"enum" => |e| try g.enumDef(t, e),
             .bitfield => |b| try g.bitfieldDef(t, b),
             .@"error" => |e| try g.errorDef(t, e),
             else => {},
         };
         if (s.constants.len > 0) try g.print("\n", .{});
-        for (s.constants) |k| try g.constant(k);
+        for (s.constants) |k| if (!g.aliased(k.at)) try g.constant(k);
 
-        for (g.slices.items) |x| try g.print("\ntypedef struct {s} {{\n    const {s};\n    uintptr_t len;\n}} {s};\n", .{ x.name, try g.decl(x.ref, "*ptr"), x.name });
+        // Guarded, since a header this one includes can have the same one
+        for (g.slices.items) |x| try g.print("\n#ifndef SAL_HAVE_{s}\n#define SAL_HAVE_{s}\ntypedef struct {s} {{\n    const {s};\n    uintptr_t len;\n}} {s};\n#endif\n", .{ x.name, x.name, x.name, try g.decl(x.ref, "*ptr"), x.name });
 
         // Objects are two words, and structs can hold them by value
-        for (s.traits) |t| try g.objectDef(try g.name(t.name));
+        for (s.traits) |t| if (!g.aliased(t.at)) try g.objectDef(try g.name(t.name));
         for (g.fns.items) |f| try g.objectDef(f.name);
 
         var done: std.ArrayList([]const u8) = .empty;
-        for (s.types) |*t| try g.structInOrder(t, &done, 0);
+        for (s.types) |*t| if (!g.aliased(t.at)) try g.structInOrder(t, &done, 0);
 
-        for (g.opts.items) |x| try g.print("\ntypedef struct {s} {{\n    {s};\n    bool some;\n}} {s};\n", .{ x.name, try g.decl(x.ref, "value"), x.name });
+        for (g.opts.items) |x| try g.print("\n#ifndef SAL_HAVE_{s}\n#define SAL_HAVE_{s}\ntypedef struct {s} {{\n    {s};\n    bool some;\n}} {s};\n#endif\n", .{ x.name, x.name, x.name, try g.decl(x.ref, "value"), x.name });
 
         for (g.fns.items) |f| {
             const sig = switch (f.ref) {
@@ -341,9 +382,55 @@ const Gen = struct {
             };
             try g.fnValue(f.name, sig);
         }
-        for (s.traits) |*t| try g.trait(t);
+        for (s.traits) |*t| if (!g.aliased(t.at)) try g.trait(t);
+        try g.declared();
 
         try g.print("\n#endif\n", .{});
+    }
+
+    /// Existing code the schema declares: each one's full name, for whatever finds it, and a pointer
+    /// type for functions, with `self` first for a struct's.
+    fn declared(g: *Gen) Error!void {
+        const s = g.s;
+        for (s.types) |*t| if (t.kind == .@"struct" and !g.aliased(t.at)) {
+            const st = t.kind.@"struct";
+            for (st.methods) |*m| try g.declaredFn(t, m);
+            for (st.statics) |st_| try g.declaredStatic(try g.fmt("{s}.{s}", .{ t.name, st_.name }), st_);
+        };
+        for (s.functions) |*m| if (!g.aliased(m.at)) try g.declaredFn(null, m);
+        for (s.statics) |st| if (!g.aliased(st.at)) try g.declaredStatic(st.name, st);
+    }
+
+    fn declaredFn(g: *Gen, in: ?*const Schema.Type, m: *const Schema.Method) Error!void {
+        const full = if (in) |t| try g.fmt("{s}.{s}", .{ t.name, m.name }) else m.name;
+        const n = try g.name(full);
+        try g.claim(try g.fmt("{s}_name", .{n}));
+        try g.print("\n/* {s}{s} */\n#define {s}_name \"{s}\"\n", .{ full, if (m.virtual) |slot| try g.fmt(", slot {d} of its vtable", .{slot}) else "", n, full });
+        // Results and promises are Salamander's own, not existing code's
+        if (m.async or m.signature.ret == .result) return;
+        var params: std.Io.Writer.Allocating = .init(g.a);
+        const w = &params.writer;
+        var first = true;
+        if (in) |t| if (!m.static) {
+            try w.print("{s} *self", .{try g.name(t.name)});
+            first = false;
+        };
+        for (m.signature.params) |p| {
+            if (p.type == .result) return;
+            if (!first) try w.writeAll(", ");
+            first = false;
+            try w.writeAll(try g.decl(p.type, try g.local(p.name)));
+        }
+        if (first) try w.writeAll("void");
+        const fn_name = try g.fmt("{s}_fn", .{n});
+        try g.claim(fn_name);
+        try g.print("typedef {s};\n", .{try g.decl(m.signature.ret, try g.fmt("({s}*{s})({s})", .{ conv(m.signature.conv), fn_name, params.written() }))});
+    }
+
+    fn declaredStatic(g: *Gen, full: []const u8, st: Schema.Static) Error!void {
+        const n = try g.name(full);
+        try g.claim(try g.fmt("{s}_name", .{n}));
+        try g.print("\n/* {s}, a {s} */\n#define {s}_name \"{s}\"\n", .{ full, try g.decl(st.type, ""), n, full });
     }
 
     fn objectDef(g: *Gen, n: []const u8) Error!void {
@@ -411,7 +498,7 @@ const Gen = struct {
         if (contains(done.items, t.name) or depth > g.s.types.len) return;
         var it: plan.Slots = .init(g.s, t);
         while (it.next()) |slot| switch (slot) {
-            .field => |f| if (byValue(f.field.type)) |dep| if (g.s.findType(dep)) |d| try g.structInOrder(d, done, depth + 1),
+            .field => |f| if (byValue(f.field.type)) |dep| if (g.s.findType(dep)) |d| if (!g.aliased(d.at)) try g.structInOrder(d, done, depth + 1),
             .pad => {},
         };
         try done.append(g.a, t.name);
@@ -427,6 +514,8 @@ const Gen = struct {
     }
 
     fn structDef(g: *Gen, t: *const Schema.Type) Error!void {
+        // Nothing known inside, so it stays opaque. C has no empty structs
+        if (t.size == 0) return;
         const n = try g.name(t.name);
         const is_union = t.kind == .@"union";
         // C can't lower one field's alignment, so a struct with any like that is packed with all its padding written out
@@ -456,7 +545,8 @@ const Gen = struct {
     }
 
     fn infoDef(g: *Gen, n: []const u8, hash: u64, label: []const u8, ms: []const *const Schema.Method, sigs: []const u64) Error!void {
-        const info = try g.fmt("{s}_info", .{n});
+        // Under `sal_`, so a method called `info` doesn't clash
+        const info = try g.fmt("sal_info_{s}", .{n});
         try g.claim(info);
         if (ms.len > 0) {
             try g.print("\nstatic const sal_MethodInfo {s}_methods[] = {{\n", .{info});
@@ -510,27 +600,28 @@ const Gen = struct {
         try g.print(" = self.table->{s}({s});\n    sal_leave(self.table->salamander_owner);\n    return r;\n}}\n", .{ m.name, args.written() });
     }
 
-    /// `Trait_get`, `Trait_provide` and `Trait_own`, over the host's, with this header's version of the trait.
+    /// `sal_get_Trait`, `sal_provide_Trait` and `sal_own_Trait`, over the host's, with this header's
+    /// version of the trait. Under `sal_` so they can't clash with the trait's own methods, like a `get`.
     fn hostHelpers(g: *Gen, n: []const u8) Error!void {
         const host = g.core("Host");
-        for ([_][]const u8{ "get", "provide", "own" }) |h| try g.claim(try g.fmt("{s}_{s}", .{ n, h }));
+        for ([_][]const u8{ "get", "provide", "own" }) |h| try g.claim(try g.fmt("sal_{s}_{s}", .{ h, n }));
         try g.print(
             \\
             \\/* The one provided as name, laid out like this header's {s}. No table if there isn't one. */
-            \\static inline {s} {s}_get({s} host, sal_string name, uint32_t major) {{
-            \\    sal_object o = {s}_get(host, name, major, (sal_Info *)&{s}_info);
+            \\static inline {s} sal_get_{s}({s} host, sal_string name, uint32_t major) {{
+            \\    sal_object o = {s}_get(host, name, major, (sal_Info *)&sal_info_{s});
             \\    {s} r = {{ o.data, (const {s}_table *)o.table }};
             \\    return r;
             \\}}
             \\
             \\/* 0, or 1 when the name's taken, 2 out of memory, 3 when its table has no owner. */
-            \\static inline uint32_t {s}_provide({s} host, sal_string name, uint32_t major, {s} obj) {{
+            \\static inline uint32_t sal_provide_{s}({s} host, sal_string name, uint32_t major, {s} obj) {{
             \\    sal_object o = {{ obj.data, obj.table }};
             \\    return {s}_provide(host, name, major, o);
             \\}}
             \\
             \\/* The host's copy of obj's table, which stops calling into it once owner closes. */
-            \\static inline {s} {s}_own({s} host, {s} obj, sal_Owner *owner) {{
+            \\static inline {s} sal_own_{s}({s} host, {s} obj, sal_Owner *owner) {{
             \\    sal_object o = {{ obj.data, obj.table }};
             \\    o = {s}_adopt(host, o, owner);
             \\    {s} r = {{ o.data, (const {s}_table *)o.table }};
@@ -571,6 +662,59 @@ const Gen = struct {
     }
 };
 
+test "declared code gets its name and a pointer type, and an empty struct stays opaque" {
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\struct Player {
+        \\    [Offset(0x10)] f32 health;
+        \\    [Sig("E8")] bool heal(u32 amount);
+        \\    [Sig("48")] static Player* instance;
+        \\}
+        \\struct World {
+        \\    [Sig("E9")] static World* spawn(Player* who);
+        \\}
+        \\[Sig("76")] static u8 seen;
+    , .{ .pointer_size = 8, .any_namespace = true, .uses = &.{"game"} }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{ .label = "game.sal" }, &diag);
+    const text = out.written();
+    const want = [_][]const u8{
+        "#define Player_heal_name \"Player.heal\"",
+        "typedef bool (*Player_heal_fn)(Player *self, uint32_t amount);",
+        "#define Player_instance_name \"Player.instance\"",
+        "typedef World *(*World_spawn_fn)(Player *who);",
+        "#define seen_name \"seen\"",
+    };
+    for (want) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, text, "struct World {") == null);
+}
+
+test "aliased files' types come from their header" {
+    const a = std.testing.allocator;
+    const source = try salamander_schema.bundle(a, &.{
+        .{ .name = "wraith/math.sal", .text = "namespace Wraith;\nstruct Vec3 { f32 x; f32 y; f32 z; }\ntrait Log { void info(string text); }\n" },
+        .{ .name = "game.sal", .text = "namespace Game;\nstruct Player { [Offset(0x10)] Vec3 pos; []Vec3 path; }\n" },
+    });
+    defer a.free(source);
+    var diag: Schema.Diagnostic = .{};
+    var parsed = try salamander_schema.parse(a, source, .{ .pointer_size = 8, .global_uses = &.{"Wraith"} }, &diag);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try write(a, parsed.schema, &out.writer, .{ .label = "schema.sal", .source = source, .aliases = &.{.{ .prefix = "wraith/", .include = "wraith.h" }} }, &diag);
+    const text = out.written();
+    for ([_][]const u8{ "#include \"wraith.h\"", "    Wraith_Vec3 pos;", "#ifndef SAL_HAVE_Slice_Wraith_Vec3" }) |part| if (std.mem.indexOf(u8, text, part) == null) {
+        std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
+        return error.TestUnexpectedResult;
+    };
+    for ([_][]const u8{ "struct Wraith_Vec3 {", "Wraith_Log_info" }) |part| try std.testing.expect(std.mem.indexOf(u8, text, part) == null);
+}
+
 test "writes a header" {
     var diag: Schema.Diagnostic = .{};
     var parsed = try salamander_schema.parse(std.testing.allocator,
@@ -594,7 +738,7 @@ test "writes a header" {
         "    if (!self.table->load) return SAL_UNSUPPORTED;",
         // Named for where it's used, not its hash
         "typedef struct t_Mover_each_visit t_Mover_each_visit;",
-        "static inline t_Mover t_Mover_get(sal_Host host, sal_string name, uint32_t major) {",
+        "static inline t_Mover sal_get_t_Mover(sal_Host host, sal_string name, uint32_t major) {",
     };
     for (want) |part| if (std.mem.indexOf(u8, text, part) == null) {
         std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
