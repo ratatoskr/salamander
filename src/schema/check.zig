@@ -12,6 +12,51 @@ pub const Error = error{InvalidSchema};
 /// Trait objects have `data`, `table` and `init`. Anything starting `salamander` is the runtime's.
 const reserved_methods = [_][]const u8{ "data", "table", "init" };
 
+/// A name as C# writes a member's: capitalised, without underscores, so `on_tick` and `onTick` are
+/// both `OnTick`. Compared a letter at a time, so it needs no room of its own.
+const CsName = struct {
+    name: []const u8,
+    suffix: []const u8 = "",
+
+    const Letters = struct {
+        n: CsName,
+        i: usize = 0,
+        up: bool = true,
+
+        fn next(it: *Letters) ?u8 {
+            while (it.i < it.n.name.len) {
+                const ch = it.n.name[it.i];
+                it.i += 1;
+                if (ch == '_') {
+                    it.up = true;
+                    continue;
+                }
+                defer it.up = false;
+                return if (it.up) std.ascii.toUpper(ch) else ch;
+            }
+            const at = it.i - it.n.name.len;
+            if (at == it.n.suffix.len) return null;
+            it.i += 1;
+            return it.n.suffix[at];
+        }
+    };
+
+    fn eql(a: CsName, b: CsName) bool {
+        var x: Letters = .{ .n = a };
+        var y: Letters = .{ .n = b };
+        while (true) {
+            const p = x.next();
+            if (p != y.next()) return false;
+            if (p == null) return true;
+        }
+    }
+};
+
+/// `Tick` of `Threads.Tick`.
+fn leafOf(name: []const u8) []const u8 {
+    return if (Schema.namespaceEnd(name)) |e| name[e + 1 ..] else name;
+}
+
 pub fn check(s: Schema, source: []const u8, diag: *Schema.Diagnostic) Error!void {
     const c: Checker = .{ .s = s, .source = source, .diag = diag };
     try c.names();
@@ -199,6 +244,7 @@ const Checker = struct {
                         if (v.value == w.value) return c.fail(v.at, "{s}.{s} and {s}.{s} are both {d}", .{ t.name, w.name, t.name, v.name, v.value });
                     }
                 }
+                try c.csPairs(t.name, e.values.len, e.values, Member.ofNamed(Schema.Enum.Value));
             },
             .bitfield => |b| {
                 const width: usize = b.backing.size(c.s.pointer_size) * 8;
@@ -218,17 +264,21 @@ const Checker = struct {
                         if (m.bit < o.bit + o.bits and o.bit < m.bit + m.bits) return c.fail(m.at, "{s}.{s} overlaps {s}", .{ t.name, m.name, o.name });
                     }
                 }
+                try c.csPairs(t.name, b.members.len, b.members, Member.ofNamed(Schema.Bits));
             },
             .@"opaque" => {},
             .func => |sig| try c.signature(sig, t.at),
-            .@"error" => |e| for (e.errors, 0..) |x, i| {
-                if (x.code == 0) return c.fail(x.at, "{s}.{s}: 0 means no error, so codes start at 1", .{ t.name, x.name });
-                if (x.code >= Schema.cancelled_code) return c.fail(x.at, "{s}.{s}: the top three codes are Cancelled, Unsupported and Gone", .{ t.name, x.name });
-                for (Schema.builtin_errors) |b| if (std.mem.eql(u8, x.name, b)) return c.fail(x.at, "{s}.{s}: every result can already fail with {s}", .{ t.name, x.name, b });
-                for (e.errors[0..i]) |y| {
-                    if (std.mem.eql(u8, x.name, y.name)) return c.fail(x.at, "{s} already has a {s}", .{ t.name, x.name });
-                    if (x.code == y.code) return c.fail(x.at, "{s}.{s} and {s}.{s} are both {d}", .{ t.name, y.name, t.name, x.name, x.code });
+            .@"error" => |e| {
+                for (e.errors, 0..) |x, i| {
+                    if (x.code == 0) return c.fail(x.at, "{s}.{s}: 0 means no error, so codes start at 1", .{ t.name, x.name });
+                    if (x.code >= Schema.cancelled_code) return c.fail(x.at, "{s}.{s}: the top three codes are Cancelled, Unsupported and Gone", .{ t.name, x.name });
+                    for (Schema.builtin_errors) |b| if ((CsName{ .name = x.name }).eql(.{ .name = b })) return c.fail(x.at, "{s}.{s}: every result can already fail with {s}", .{ t.name, x.name, b });
+                    for (e.errors[0..i]) |y| {
+                        if (std.mem.eql(u8, x.name, y.name)) return c.fail(x.at, "{s} already has a {s}", .{ t.name, x.name });
+                        if (x.code == y.code) return c.fail(x.at, "{s}.{s} and {s}.{s} are both {d}", .{ t.name, y.name, t.name, x.name, x.code });
+                    }
                 }
+                try c.csPairs(t.name, e.errors.len, e.errors, Member.ofNamed(Schema.ErrorSet.Error));
             },
         }
     }
@@ -260,6 +310,8 @@ const Checker = struct {
             for (st.methods) |m| if (std.mem.eql(u8, v.name, m.name)) return c.fail(v.at, "{s} already has a {s}", .{ t.name, v.name });
             for (st.statics[0..i]) |o| if (std.mem.eql(u8, v.name, o.name)) return c.fail(v.at, "{s} already has a {s}", .{ t.name, v.name });
         }
+        // Not against what's nested in it, since game structs come from other tools' names
+        try c.csPairs(t.name, st.fields.len + st.methods.len + st.statics.len, st, Member.ofStruct);
     }
 
     /// `T[count] items;`, where `count` is a whole number in the same struct or its bases.
@@ -286,6 +338,8 @@ const Checker = struct {
             for (t.methods[0..i]) |o| if (std.mem.eql(u8, m.name, o.name)) return c.fail(m.at, "{s} already has a {s}", .{ t.name, m.name });
             try c.signature(m.signature, m.at);
         }
+        try c.csPairs(t.name, t.methods.len, t.methods, Member.ofMethod);
+        for (t.methods) |m| try c.csNested(t.name, .{ .name = m.name, .suffix = if (m.async) "Async" else "", .at = m.at });
         // Each name means one method, wherever it's from
         for (c.s.traits) |*other| {
             if (!c.s.extends(t, other)) continue;
@@ -294,6 +348,67 @@ const Checker = struct {
                 if (found.method != m) return c.fail(if (found.trait == t) found.method.at else t.at, "{s}: {s}.{s} and {s}.{s} have the same name", .{ t.name, found.trait.name, m.name, other.name, m.name });
             }
         }
+    }
+
+    /// One of a type's or trait's members, as C# names it.
+    const Member = struct {
+        name: []const u8,
+        /// Like `Async`, on an async method
+        suffix: []const u8 = "",
+        at: Schema.Pos,
+
+        fn ofNamed(comptime T: type) fn ([]const T, usize) Member {
+            return struct {
+                fn get(list: []const T, i: usize) Member {
+                    return .{ .name = list[i].name, .at = list[i].at };
+                }
+            }.get;
+        }
+
+        fn ofMethod(list: []const Schema.Method, i: usize) Member {
+            return .{ .name = list[i].name, .suffix = if (list[i].async) "Async" else "", .at = list[i].at };
+        }
+
+        /// Its fields, then its methods, then its statics.
+        fn ofStruct(st: Schema.Struct, i: usize) Member {
+            if (i < st.fields.len) return .{ .name = st.fields[i].name, .at = st.fields[i].at };
+            const j = i - st.fields.len;
+            if (j < st.methods.len) return .{ .name = st.methods[j].name, .at = st.methods[j].at };
+            const v = st.statics[j - st.methods.len];
+            return .{ .name = v.name, .at = v.at };
+        }
+
+        fn cs(m: Member) CsName {
+            return .{ .name = m.name, .suffix = m.suffix };
+        }
+    };
+
+    /// Members C# would give one name, though they're different here.
+    fn csPairs(c: Checker, owner: []const u8, count: usize, list: anytype, comptime get: fn (@TypeOf(list), usize) Member) Error!void {
+        for (0..count) |i| {
+            const a = get(list, i);
+            for (0..i) |j| {
+                const b = get(list, j);
+                if (std.mem.eql(u8, a.name, b.name) and std.mem.eql(u8, a.suffix, b.suffix)) continue;
+                if (a.cs().eql(b.cs())) return c.fail(a.at, "{s}.{s} and {s}.{s} are one name in C#, which capitalises them and drops underscores", .{ owner, b.name, owner, a.name });
+            }
+        }
+    }
+
+    /// A trait's method C# would name like something declared inside the trait, which C# puts in
+    /// the trait's class too, like `Threads.tick` and `Threads.Tick`.
+    fn csNested(c: Checker, owner: []const u8, m: Member) Error!void {
+        // One named like its owner gets a `_` in C#, so it's apart
+        if (m.cs().eql(.{ .name = leafOf(owner) })) return;
+        const s = c.s;
+        inline for (.{ s.types, s.traits, s.constants }) |list| for (list) |inner| {
+            // A field's own bitfield, which C# names apart from the field
+            if (@hasField(@TypeOf(inner), "nested") and inner.nested) continue;
+            const end = Schema.namespaceEnd(inner.name) orelse continue;
+            if (end != owner.len or !std.mem.startsWith(u8, inner.name, owner)) continue;
+            if (m.cs().eql(.{ .name = inner.name[end + 1 ..] }))
+                return c.fail(m.at, "{s}.{s} and {s} are one name in C#, which capitalises members and puts what's in {s} inside it", .{ owner, m.name, inner.name, owner });
+        };
     }
 
     fn impl(c: Checker, im: *const Schema.Impl, index: usize) Error!void {

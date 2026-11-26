@@ -670,7 +670,7 @@ test "namespaces are globals, with a root's accessors and names in a trait's nam
         \\    [game.Sig("48")] static u32 ticks;
         \\}
         \\namespace Wraith {
-        \\    trait Tweaks { void add(Definition d); Mode mode(); }
+        \\    trait Tweaks { void add(Definition d); Mode currentMode(); }
         \\    namespace Tweaks {
         \\        enum Mode : u8 { off, toggle }
         \\        struct Definition { u8[16] id; Mode mode; }
@@ -687,7 +687,7 @@ test "namespaces are globals, with a root's accessors and names in a trait's nam
         "declare namespace World {\n  interface Counter {\n    n: number;\n    next: World.Counter | null;\n  }",
         "  namespace Inner {\n    type Mode = number;",
         "declare namespace Wraith {",
-        "  interface Tweaks {\n    add(d: import(\"salamander\").Given<Wraith.Tweaks.Definition>): void;\n    mode(): Wraith.Tweaks.Mode;\n  }",
+        "  interface Tweaks {\n    add(d: import(\"salamander\").Given<Wraith.Tweaks.Definition>): void;\n    currentMode(): Wraith.Tweaks.Mode;\n  }",
         "  interface Vfs {\n    close(): void;\n  }",
         "  namespace Tweaks {\n    type Mode = number;",
         "    interface Definition {\n      id: string;\n      mode: Wraith.Tweaks.Mode | Wraith.Tweaks.ModeName;\n    }",

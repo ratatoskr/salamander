@@ -666,7 +666,7 @@ test "namespaces are globals, with a root's accessors and names in a trait's nam
         \\    [game.Sig("48")] static u32 ticks;
         \\}
         \\namespace Wraith {
-        \\    trait Tweaks { void add(Definition d); Mode mode(); }
+        \\    trait Tweaks { void add(Definition d); Mode currentMode(); }
         \\    namespace Tweaks {
         \\        enum Mode : u8 { off, toggle }
         \\        struct Definition { u8[16] id; Mode mode; }

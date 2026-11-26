@@ -314,6 +314,13 @@ test "32-bit layout" {
 test "mistakes say where and why" {
     const cases = [_]struct { []const u8, []const u8 }{
         .{ "struct A { u32 x; void f(); }", "1:19: A.f needs to say where it is" },
+        // C# capitalises members and drops underscores, so these are one name there
+        .{ "namespace N; namespace T { fn void Tick(); } trait T { void tick(); }", "T.tick and N.T.Tick are one name in C#" },
+        .{ "namespace N; trait T { void on_tick(); void onTick(); }", "T.on_tick and N.T.onTick are one name in C#" },
+        .{ "namespace N; trait T { void runAsync(); async void run(); }", "T.runAsync and N.T.run are one name in C#" },
+        .{ "namespace N; struct S { u32 max_hp; u32 maxHp; }", "S.max_hp and N.S.maxHp are one name in C#" },
+        .{ "namespace N; enum E : u8 { pos_y, posY }", "E.pos_y and N.E.posY are one name in C#" },
+        .{ "namespace N; error E { unsupported = 1 }", "every result can already fail with Unsupported" },
         .{ "struct A { u32 x; [Virtual(1)] void x(); }", "A already has a field x" },
         .{ "struct A { u32 x; [Virtual(1)] static void f(); }", "a static method can't have [Virtual]" },
         .{ "struct A { u32 x; static u32 count; }", "A.count needs to say where it is" },
