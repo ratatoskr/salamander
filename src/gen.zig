@@ -1,7 +1,8 @@
 //! `salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]`
 //! `salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--check]`
 //! `salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]`
-//! `--namespace NS` is where files that don't say a namespace go, and C#'s home for its `Raw`. `--class
+//! `salamander-gen cpp <out.hpp> <in> [--pointer-size N] [--namespace NS] [--core] [--alias PREFIX=HEADER]... [--check]`
+//! `--namespace NS` is where files that don't say a namespace go, and C#'s home for its `Raw`. C++ puts what has no namespace there. `--class
 //! NAME` is C#'s class with the constants.
 //! `--file-namespace PREFIX=NS` puts files whose names start with PREFIX in NS instead, like a
 //! dependency's `freecam/=Freecam`.
@@ -12,7 +13,7 @@
 //! `--with NAME DIR` adds another folder's `.sal` files, named `NAME/...`, like a dependency's.
 //! `--alias PREFIX=MODULE` takes what files starting with PREFIX declare from the Zig module MODULE,
 //! like `--alias wraith/=wraith_api_zig`, so the types are the ones that module already has. For C
-//! it's a header to include, like `--alias wraith/=wraith.h`, and for C# a namespace.
+//! it's a header to include, like `--alias wraith/=wraith.h`, the same for C++, and for C# a namespace.
 //! `--check` writes nothing and fails if the output isn't what it would write.
 
 const std = @import("std");
@@ -20,6 +21,7 @@ const salamander_schema = @import("salamander_schema");
 const salamander_zig = @import("salamander_zig");
 const salamander_c = @import("salamander_c");
 const salamander_cs = @import("salamander_cs");
+const salamander_cpp = @import("salamander_cpp");
 
 const Schema = salamander_schema.Schema;
 
@@ -31,8 +33,9 @@ pub fn main(init: std.process.Init) !void {
     const lang = args.next() orelse return usage();
     const is_c = std.mem.eql(u8, lang, "c");
     const is_cs = std.mem.eql(u8, lang, "cs");
+    const is_cpp = std.mem.eql(u8, lang, "cpp");
     const is_bundle = std.mem.eql(u8, lang, "bundle");
-    if (!is_c and !is_cs and !is_bundle and !std.mem.eql(u8, lang, "zig")) return usage();
+    if (!is_c and !is_cs and !is_cpp and !is_bundle and !std.mem.eql(u8, lang, "zig")) return usage();
     const out_path = args.next() orelse return usage();
     const in_path = args.next() orelse return usage();
     var pointer_size: u8 = @sizeOf(usize);
@@ -50,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     var aliases: std.ArrayList(salamander_zig.Alias) = .empty;
     var cs_aliases: std.ArrayList(salamander_cs.Alias) = .empty;
     var c_aliases: std.ArrayList(salamander_c.Alias) = .empty;
+    var cpp_aliases: std.ArrayList(salamander_cpp.Alias) = .empty;
     var instances: std.ArrayList(salamander_schema.InstanceTag) = .empty;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--pointer-size")) {
@@ -92,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
             try aliases.append(arena, .{ .prefix = spec[0..eq], .import = spec[eq + 1 ..] });
             try cs_aliases.append(arena, .{ .prefix = spec[0..eq], .namespace = spec[eq + 1 ..] });
             try c_aliases.append(arena, .{ .prefix = spec[0..eq], .include = spec[eq + 1 ..] });
+            try cpp_aliases.append(arena, .{ .prefix = spec[0..eq], .include = spec[eq + 1 ..] });
         } else return usage();
     }
 
@@ -119,6 +124,8 @@ pub fn main(init: std.process.Init) !void {
     const label = std.fs.path.basename(in_path);
     const written = if (is_c)
         salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core, .source = source, .aliases = c_aliases.items }, &diag)
+    else if (is_cpp)
+        salamander_cpp.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .core = core, .source = source, .aliases = cpp_aliases.items }, &diag)
     else if (is_cs)
         salamander_cs.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .class = class, .core = core, .source = source, .aliases = cs_aliases.items }, &diag)
     else
@@ -127,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
         error.NameClash => fail(in_path, is_dir, diag.message()),
         else => return err,
     };
-    const text = if (is_c or is_cs) out.written() else try formatted(arena, out.written());
+    const text = if (is_c or is_cs or is_cpp) out.written() else try formatted(arena, out.written());
     if (check) {
         const have = std.Io.Dir.cwd().readFileAlloc(io, out_path, arena, .limited(16 << 20)) catch "";
         if (!std.mem.eql(u8, std.mem.trim(u8, have, "\r\n"), std.mem.trim(u8, text, "\r\n"))) {
@@ -192,6 +199,7 @@ fn usage() error{Usage} {
         \\usage: salamander-gen zig <out.zig> <in> [--pointer-size N] [--runtime NAME] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--check]
         \\       salamander-gen c <out.h> <in> [--pointer-size N] [--prefix P] [--core] [--use NS]... [--global-use NS]... [--namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--alias PREFIX=HEADER]... [--check]
         \\       salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]
+        \\       salamander-gen cpp <out.hpp> <in> [--pointer-size N] [--namespace NS] [--core] [--use NS]... [--global-use NS]... [--default-namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--alias PREFIX=HEADER]... [--check]
         \\       salamander-gen bundle <out.sal> <in>
         \\<in> is a .sal file, or a folder of them that make one schema.
         \\

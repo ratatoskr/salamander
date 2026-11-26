@@ -235,6 +235,122 @@ test "C provides through the host, and Zig gets it" {
     try testing.expectEqual(9, from_c.c_get_and_set(rt.host(), 9));
 }
 
+// C++'s side, in cpp/test.cpp, built against the generated header
+const from_cpp = struct {
+    extern fn cpp_damage(d: gen.Damageable, amount: f32) bool;
+    extern fn cpp_health(d: gen.Damageable) f32;
+    extern fn cpp_position(d: gen.Damageable) gen.Vec3;
+    extern fn cpp_restore(f: gen.Freecam, name: rt.String, out: *gen.Vec3) u32;
+    extern fn cpp_load(f: gen.Freecam, path: rt.String, limit: rt.Opt(u32)) rt.String;
+    extern fn cpp_fly(f: gen.Freecam, x: f32) f32;
+    extern fn cpp_flags_level(f: u32) u32;
+    extern fn cpp_flags_with_job(f: u32, j: u8) u32;
+    extern fn cpp_cam() gen.Freecam;
+    extern fn cpp_cam_speed() f32;
+    extern fn cpp_target() gen.Damageable;
+    extern fn cpp_provide(h: rt.Host) u32;
+    extern fn cpp_get_and_set(h: rt.Host, speed: f32) f32;
+    extern fn cpp_visit(n: u32) u32;
+    extern fn cpp_keep(h: rt.Host) c_int;
+    extern fn cpp_init(h: rt.Host) bool;
+    extern fn cpp_flyer() gen.Freecam;
+    extern fn cpp_as_named(h: rt.Host) u32;
+    extern fn cpp_coroutine(zig: gen.Freecam) u32;
+    extern fn cpp_dropped() u32;
+    extern fn cpp_held() c_int;
+    extern fn cpp_game(locate: *const fn (name: rt.String) callconv(.c) usize) u32;
+};
+
+test "C++ calls through Zig's tables" {
+    var player: gen.Player = std.mem.zeroes(gen.Player);
+    const vt: *const anyopaque = &vtable;
+    @memcpy(std.mem.asBytes(&player)[0..@sizeOf(usize)], std.mem.asBytes(&vt));
+    player.health = 10;
+    player.pos = .{ .x = 1, .y = 2, .z = 3 };
+    const obj: gen.Damageable = .init(&player, gen.impl.@"Damageable for Player"());
+    // damage is thiscall, so on x86 this checks C++ and Zig agree on it
+    try testing.expect(!from_cpp.cpp_damage(obj, 4));
+    try testing.expectEqual(6, from_cpp.cpp_health(obj));
+    try testing.expectEqual(gen.Vec3{ .x = 1, .y = 2, .z = 3 }, from_cpp.cpp_position(obj));
+
+    var cam: Cam = .{ .speed = 2 };
+    const fc: gen.Freecam = .init(&cam, rt.implement(gen.Freecam, Cam));
+    var v: gen.Vec3 = undefined;
+    try testing.expectEqual(0, from_cpp.cpp_restore(fc, .init("x"), &v));
+    try testing.expectEqual(1, v.x);
+    try testing.expectEqual(@backingInt(gen.LoadErrorCode.NotFound), from_cpp.cpp_restore(fc, .init(""), &v));
+    try testing.expectEqualStrings("ab", from_cpp.cpp_load(fc, .init("abc"), .init(2)).get());
+    try testing.expectEqualStrings("abc", from_cpp.cpp_load(fc, .init("abc"), .init(null)).get());
+    try testing.expectEqual(5, from_cpp.cpp_fly(fc, 5));
+
+    // No object gives zero, or Gone for a result
+    try testing.expectEqual(0, from_cpp.cpp_health(.{}));
+    try testing.expectEqual(rt.gone_code, from_cpp.cpp_restore(.{}, .init("x"), &v));
+    try testing.expectEqual(-1, from_cpp.cpp_fly(.{}, 5));
+}
+
+test "Zig calls a trait implemented in C++" {
+    const obj = from_cpp.cpp_cam();
+    obj.setSpeed(4);
+    try testing.expectEqual(4, from_cpp.cpp_cam_speed());
+    try testing.expectEqualStrings("ab", obj.load("abc", 2));
+    try testing.expectEqualStrings("abc", obj.load("abc", null));
+    try testing.expectError(error.NotFound, obj.restore(""));
+    try testing.expectEqual(2, (try obj.restore("xy")).y);
+    // Ones the class doesn't have give zero
+    try testing.expectEqual(null, obj.flyTo(.{ .x = 0, .y = 0, .z = 0 }).table);
+
+    // Including a base's
+    const target = from_cpp.cpp_target();
+    try testing.expect(!target.damage(4));
+    try testing.expectEqual(6, target.health());
+    try testing.expectEqualStrings("target", target.name());
+    try testing.expectEqual(0, target.position().x);
+    try testing.expect(target.damage(6));
+}
+
+test "C++ reads bitfields like Zig" {
+    var flags: gen.Flags = .{ .alive = true, .level = 0x5a, .job = .mage };
+    const bits: u32 = @bitCast(flags);
+    try testing.expectEqual(0x5a, from_cpp.cpp_flags_level(bits));
+    flags.job = .thief;
+    try testing.expectEqual(@as(u32, @bitCast(flags)), from_cpp.cpp_flags_with_job(bits, @backingInt(gen.Job.thief)));
+}
+
+test "C++ provides through the host, and Zig gets it" {
+    try testing.expectEqual(0, from_cpp.cpp_provide(rt.host()));
+    const cam = rt.host().get(gen.Freecam, "cpp.cam", 1).?;
+    cam.setSpeed(7);
+    try testing.expectEqual(7, from_cpp.cpp_cam_speed());
+    try testing.expectEqual(9, from_cpp.cpp_get_and_set(rt.host(), 9));
+}
+
+test "C++ function values, kept ones, and promises" {
+    try testing.expectEqual(31, from_cpp.cpp_visit(3));
+    try testing.expectEqual(10, from_cpp.cpp_visit(1));
+    // Called, not destroyed while held, destroyed once released
+    try testing.expectEqual(101, from_cpp.cpp_keep(rt.host()));
+    // Settled by C++ through the host init gave it
+    const obj = from_cpp.cpp_cam();
+    try testing.expectError(error.Corrupt, obj.find(0).wait());
+    // Resolved with no object, which is null
+    try testing.expectEqual(null, try obj.find(1).wait());
+}
+
+test "C++ coroutines, held objects and bases" {
+    // Kept objects and promises go through the host init gave C++
+    try testing.expect(from_cpp.cpp_init(rt.host()));
+    // A coroutine's future, settled by its co_return
+    try testing.expectEqual(4, (try from_cpp.cpp_flyer().flyTo(.{ .x = 2, .y = 0, .z = 0 }).wait()).x);
+    // Waited, then 20 * 2 and Zig's 1
+    var cam: Cam = .{};
+    const fc: gen.Freecam = .init(&cam, rt.implement(gen.Freecam, Cam));
+    try testing.expectEqual(1041, from_cpp.cpp_coroutine(fc));
+    try testing.expectEqual(rt.gone_code, from_cpp.cpp_dropped());
+    try testing.expectEqual(1, from_cpp.cpp_held());
+    try testing.expectEqual(1, from_cpp.cpp_as_named(rt.host()));
+}
+
 /// What `test.sal`'s game code finds, standing in for a game.
 const FakeGame = struct {
     var player: gen.Player = .{};
@@ -271,6 +387,10 @@ const FakeGame = struct {
         inline for (all) |e| if (std.mem.eql(u8, e[0], name)) return e[1];
         return error.NotFound;
     }
+
+    fn locate(name: rt.String) callconv(.c) usize {
+        return find(null, name.get()) catch 0;
+    }
 };
 
 test "generated Zig calls game code and reads its statics" {
@@ -293,6 +413,10 @@ test "generated Zig calls game code and reads its statics" {
     try testing.expectEqual(7, gen.Scene.Graph.sum(3, 4));
     try testing.expectEqual(@intFromPtr(&FakeGame.table) + 2 * @sizeOf(usize), try gen.Player.addresses.attack());
     try gen.resolve();
+
+    // And C++ does too, through the same locator
+    try testing.expectEqual(0, from_cpp.cpp_game(&FakeGame.locate));
+    try testing.expectEqual(5, FakeGame.count);
 }
 
 const plain = @import("plain");

@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "salamander_runtime", .module = runtime },
     });
     _ = ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }});
+    _ = ctx.addModule("cpp", &.{.{ .name = "salamander_schema", .module = schema }});
     // C#, with the runtime's own core.sal so tools can write its C# too
     ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
     // Typings for scripts' editors
@@ -97,6 +98,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "salamander_schema", .module = host_schema },
                 .{ .name = "salamander_zig", .module = host_zig },
                 .{ .name = "salamander_c", .module = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
+                .{ .name = "salamander_cpp", .module = host.module("cpp", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
                 .{ .name = "salamander_cs", .module = blk: {
                     const cs = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }});
                     cs.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
@@ -110,6 +112,9 @@ pub fn build(b: *std.Build) void {
     // salamander.h and the core traits' header, for C
     const base_headers = baseHeaders(b, gen);
     b.installDirectory(.{ .source_dir = base_headers, .install_dir = .header, .install_subdir = "" });
+    // And C++'s
+    const base_cpp = baseCppHeaders(b, gen);
+    b.installDirectory(.{ .source_dir = base_cpp, .install_dir = .header, .install_subdir = "" });
 
     // The runtime's own traits are generated too, kept in the repo since the runtime can't use the generator
     const core_update = b.addRunArtifact(gen);
@@ -148,6 +153,10 @@ pub fn build(b: *std.Build) void {
     // And C's view of the same schema has to match both
     agree.addIncludePath(cHeadersWith(b, gen, base_headers, .{ .source = b.path("src/schema/test.sal"), .target = target, .name = "test_schema.h" }));
     agree.addCSourceFile(.{ .file = b.path("src/c/test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    // And C++'s
+    agree.addIncludePath(cppHeadersWith(b, gen, base_cpp, .{ .source = b.path("src/schema/test.sal"), .target = target, .name = "test_schema.hpp" }));
+    agree.addCSourceFile(.{ .file = b.path("src/cpp/test.cpp"), .flags = &.{ "-std=c++20", "-Wall", "-Wextra", "-Werror" } });
+    agree.link_libcpp = true;
     ctx.addTests("agree", agree);
 }
 
@@ -297,6 +306,81 @@ fn cHeadersWith(b: *std.Build, gen: *std.Build.Step.Compile, base: std.Build.Laz
     } else run.addFileArg(options.source orelse @panic("cHeaders needs a source or a folder"));
     run.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{options.target.result.ptrBitWidth() / 8}) });
     if (options.prefix.len > 0) run.addArgs(&.{ "--prefix", options.prefix });
+    for (options.uses) |u| run.addArgs(&.{ "--use", u });
+    for (options.global_uses) |u| run.addArgs(&.{ "--global-use", u });
+    if (options.namespace.len > 0) run.addArgs(&.{ "--default-namespace", options.namespace });
+    for (options.file_namespaces) |f| run.addArgs(&.{ "--file-namespace", f });
+    for (options.instances) |i| run.addArgs(&.{ "--instance", i });
+    for (options.with) |w| {
+        run.addArgs(&.{ "--with", w.name });
+        run.addDirectoryArg(w.folder);
+        trackSal(run, w.folder);
+    }
+    for (options.aliases) |a| run.addArgs(&.{ "--alias", b.fmt("{s}={s}", .{ a.prefix, a.include }) });
+    const files = b.addWriteFiles();
+    _ = files.addCopyDirectory(base, "", .{});
+    _ = files.addCopyFile(header, options.name);
+    return files.getDirectory();
+}
+
+pub const CppHeaderOptions = struct {
+    /// A `.sal` file. Or use `folder`.
+    source: ?std.Build.LazyPath = null,
+    /// A folder of `.sal` files that make one schema, like a `schemas` folder.
+    folder: ?std.Build.LazyPath = null,
+    /// Gives the schema its pointer size.
+    target: std.Build.ResolvedTarget,
+    /// What to `#include`.
+    name: []const u8,
+    /// Where what has no namespace goes in C++, like `Game`. The top if empty.
+    home: []const u8 = "",
+    /// Tools' namespaces in scope in every file, like `&.{"wraith"}` so they can say `[Sig]`.
+    uses: []const []const u8 = &.{},
+    /// Where files that don't say a namespace go, like a plugin's own. Empty is the top.
+    namespace: []const u8 = "",
+    /// Annotations that stand for a static, like `wraith.Instance=Sig`, see `ZigOptions.instances`.
+    instances: []const []const u8 = &.{},
+    /// Namespaces every file uses the types of by their short names, like `&.{"Wraith"}`.
+    global_uses: []const []const u8 = &.{},
+    /// Like `freecam/=Freecam`, see `ZigOptions.file_namespaces`.
+    file_namespaces: []const []const u8 = &.{},
+    /// Other folders' `.sal` files, named `name/...`, like a dependency's.
+    with: []const ZigOptions.With = &.{},
+    /// What files starting with `prefix` declare comes from header `include` instead of being written again.
+    aliases: []const CHeaderOptions.Alias = &.{},
+};
+
+/// A folder with `salamander.hpp`, `salamander_runtime.hpp`, `salamander_core.hpp` and a header for `source`,
+/// for `addIncludePath`. Needs C++20.
+pub fn cppHeaders(dep: *std.Build.Dependency, options: CppHeaderOptions) std.Build.LazyPath {
+    const gen = dep.artifact("salamander-gen");
+    return cppHeadersWith(dep.builder, gen, baseCppHeaders(dep.builder, gen), options);
+}
+
+/// `salamander.hpp`, `salamander_runtime.hpp`, and `salamander_core.hpp` made from `core.sal`.
+fn baseCppHeaders(b: *std.Build, gen: *std.Build.Step.Compile) std.Build.LazyPath {
+    const run = b.addRunArtifact(gen);
+    run.addArg("cpp");
+    const core_h = run.addOutputFileArg("salamander_core.hpp");
+    run.addFileArg(b.path("src/runtime/core.sal"));
+    run.addArg("--core");
+    const files = b.addWriteFiles();
+    _ = files.addCopyFile(b.path("src/cpp/salamander.hpp"), "salamander.hpp");
+    _ = files.addCopyFile(b.path("src/cpp/salamander_runtime.hpp"), "salamander_runtime.hpp");
+    _ = files.addCopyFile(core_h, "salamander_core.hpp");
+    return files.getDirectory();
+}
+
+fn cppHeadersWith(b: *std.Build, gen: *std.Build.Step.Compile, base: std.Build.LazyPath, options: CppHeaderOptions) std.Build.LazyPath {
+    const run = b.addRunArtifact(gen);
+    run.addArg("cpp");
+    const header = run.addOutputFileArg(options.name);
+    if (options.folder) |f| {
+        run.addDirectoryArg(f);
+        trackSal(run, f);
+    } else run.addFileArg(options.source orelse @panic("cppHeaders needs a source or a folder"));
+    run.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{options.target.result.ptrBitWidth() / 8}) });
+    if (options.home.len > 0) run.addArgs(&.{ "--namespace", options.home });
     for (options.uses) |u| run.addArgs(&.{ "--use", u });
     for (options.global_uses) |u| run.addArgs(&.{ "--global-use", u });
     if (options.namespace.len > 0) run.addArgs(&.{ "--default-namespace", options.namespace });
