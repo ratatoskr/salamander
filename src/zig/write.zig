@@ -37,9 +37,7 @@ pub const Options = struct {
     aliases: []const Alias = &.{},
 };
 
-/// Everything declared in bundled files whose names start with `prefix`, like `wraith/`, comes from
-/// the Zig module `import` instead, which has the same names. Structs are checked against the
-/// schema's layout as they compile.
+/// Files whose names start with `prefix` come from Zig module `import`, with the same names. Structs are checked against the schema's layout.
 pub const Alias = struct {
     prefix: []const u8,
     import: []const u8,
@@ -130,8 +128,7 @@ const Gen = struct {
         }
     }
 
-    /// The game's code right in namespace `path` by its own names, like `Kai.addresses.spawn()` and
-    /// `Kai.Fns.spawn`, as structs' bodies have theirs.
+    /// The game's code right in namespace `path`, like `Kai.addresses.spawn()` and `Kai.Fns.spawn`.
     fn namespaceCode(g: *Gen, path: []const u8, indent: []const u8) Error!void {
         const w = g.w;
         const s = g.s;
@@ -250,8 +247,7 @@ const Gen = struct {
         }
     }
 
-    /// Whether a parameter or return's plain type differs. Text and slices of what doesn't differ
-    /// cross as they are.
+    /// Whether a parameter or return's plain type differs. Text and slices of what doesn't differ cross as they are.
     fn argDiffers(g: *const Gen, r: Ref) bool {
         return switch (r) {
             .prim => false,

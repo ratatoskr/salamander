@@ -373,8 +373,7 @@ fn builtinTypeOf(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _:
     return qjs.string(ctx, std.fmt.bufPrint(&buf, "{f}", .{v.type}) catch "?");
 }
 
-/// `load(name, text)` loads a `.sal` written while running, in place of what was loaded as `name`.
-/// Its names work from then on, and it gives what it declares like the `schema` module.
+/// `load(name, text)` loads a `.sal` in place of what was loaded as `name`, and gives what it declares.
 fn builtinLoad(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
     const ctx = ctx_.?;
     const b = binderData(ctx, data[0]);
@@ -414,8 +413,7 @@ fn builtinSave(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c
     return c.JS_NewInt64(ctx, @intCast(n));
 }
 
-/// `edit(view, fn)` calls `fn` with a snapshot and saves it after, once its promise resolves if it
-/// gives one. Nothing's saved if it throws.
+/// `edit(view, fn)` calls `fn` with a snapshot and saves it after, once a returned promise resolves. Nothing's saved if it throws.
 fn builtinEdit(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
     const ctx = ctx_.?;
     const b = binderData(ctx, data[0]);
@@ -494,8 +492,7 @@ fn signatureArg(b: *Binder, v: Value) convert.Error!script.Core(Binder).Signatur
     };
 }
 
-/// `fn(signature, f)` types `f`, so native code taking an object gets a function value of that type.
-/// A declared function works as its signature too.
+/// `fn(signature, f)` types `f` as a function value of that signature, which can be a declared function.
 fn builtinFn(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
     const ctx = ctx_.?;
     const b = binderData(ctx, data[0]);
@@ -511,16 +508,14 @@ fn declaredName(b: *Binder, v: Value) Value {
     return c.JS_GetProperty(b.ctx, v, b.declared_tag);
 }
 
-/// `nameOf(f)`, the full name of a declared function like `Kai.Player.heal`, or undefined for
-/// anything else.
+/// `nameOf(f)`, the full name of a declared function like `Kai.Player.heal`, or undefined.
 fn builtinNameOf(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
     const ctx = ctx_.?;
     if (argc < 1) return qjs.undefined_value;
     return binderData(ctx, data[0]).declaredName(argv[0]);
 }
 
-/// `params(f)`, the names of a function's parameters as written. One that isn't a plain name, like
-/// `{ a, b }`, is "".
+/// `params(f)`, the names of a function's parameters, "" for destructured ones like `{ a, b }`.
 fn builtinParams(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, _: [*c]Value) callconv(.c) Value {
     const ctx = ctx_.?;
     if (argc < 1 or !c.JS_IsFunction(ctx, argv[0])) return qjs.throw(ctx, "params takes a function", .{});
@@ -563,8 +558,7 @@ fn callNative(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_
 
 const Where = union(enum) {
     address: usize,
-    /// Found by the core's locator. A given `this` goes before the script's arguments. A [Virtual(n)]
-    /// one's found through its vtable, or else the first argument's.
+    /// Found by the core's locator, a [Virtual(n)] one through `this`'s vtable or else the first argument's. A given `this` goes first.
     declared: struct { name: []const u8, found: Schema.Function, this: ?usize = null },
 };
 
@@ -634,13 +628,11 @@ fn callDeclared(b: *Binder, name: []const u8, this: ?usize, args: []const Value)
     return b.callAt(sig.trait, sig.function, .{ .declared = .{ .name = name, .found = f, .this = this } }, args);
 }
 
-// The `schema` module, for code that already exists like a game's. Structs with code or statics are
-// classes. Statics read memory each time, methods take `this` first and `at(address)` gives a view.
+// The `schema` module, for existing code like a game's. Structs are classes, statics read memory each time.
 
 pub const schema_module = "schema";
 
-/// Structs and top-level functions, and the namespaces at the top that others are in. Top-level
-/// statics are only on the default export, since an export can't read memory each time.
+/// Structs, top-level functions and top namespaces. Top-level statics are only on the default export, which reads them live.
 pub fn schemaExports(b: *Binder, out: *std.ArrayList([:0]const u8), a: std.mem.Allocator) error{OutOfMemory}!void {
     var it = b.core.declaring();
     while (it.next()) |s| {
@@ -757,8 +749,7 @@ fn addressJs(ctx_: ?*qjs.Context, _: Value, _: c_int, _: [*c]Value, _: c_int, da
     return c.JS_NewInt64(ctx, @bitCast(@as(u64, at)));
 }
 
-/// The object for `name`'s namespace under `all`, made on the way, and the rest of its name. So
-/// `Scene.Node` goes on `all.Scene` as `Node`. Caller frees it.
+/// The object for `name`'s namespace under `all`, made as needed, and the rest of its name. Caller frees it.
 fn namespaceIn(b: *Binder, all: Value, name: []const u8) convert.Error!struct { Value, []const u8 } {
     const end = Schema.namespaceEnd(name) orelse return .{ c.JS_DupValue(b.ctx, all), name };
     return .{ try b.objectIn(all, name[0..end]), name[end + 1 ..] };
@@ -766,8 +757,7 @@ fn namespaceIn(b: *Binder, all: Value, name: []const u8) convert.Error!struct { 
 
 // Namespaces: each one at the top, like `Wraith`, and what `[Root]` objects give
 
-/// The namespaces at the top of `all`, from `schemaObject`, as globals. Gives the name of one that
-/// would hide a global JS has already, like `Math`, copied into `clash`, setting none.
+/// Sets the top namespaces of `all` as globals, unless one would hide a built-in like `Math`, whose name goes in `clash`.
 pub fn globalsFrom(b: *Binder, all: Value, clash: []u8) convert.Error!?[]const u8 {
     const ctx = b.ctx;
     var tab: [*c]c.JSPropertyEnum = null;
@@ -791,9 +781,7 @@ pub fn globalsFrom(b: *Binder, all: Value, clash: []u8) convert.Error!?[]const u
     return null;
 }
 
-/// A `[Root]` object of `trait` in `m`, on the namespaces in `all`. Each accessor, like `tweaks()`, is
-/// a function on its namespace, like `Wraith.tweaks()`, and each trait one gives has `instance()`
-/// the same. So does the root's own trait, giving it.
+/// Puts a `[Root]` object's accessors, like `Wraith.tweaks()`, on its namespace, and `instance()` on the traits they give and its own.
 pub fn exposeRoot(b: *Binder, all: Value, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) convert.Error!void {
     const ctx = b.ctx;
     const t = try b.trait(m, trait_name);
@@ -882,8 +870,7 @@ fn accessorJs(ctx_: ?*qjs.Context, _: Value, _: c_int, _: [*c]Value, _: c_int, d
     return v;
 }
 
-/// The object at `path` under `all`, like `Scene.Node`, made with any on the way if they're not
-/// there. Caller frees it.
+/// The object at `path` under `all`, like `Scene.Node`, made as needed. Caller frees it.
 fn objectIn(b: *Binder, all: Value, path: []const u8) convert.Error!Value {
     const ctx = b.ctx;
     const in, const leaf = try b.namespaceIn(all, path);
@@ -1338,8 +1325,7 @@ fn thrown(b: *Binder, s: Schema, errors: ?[]const u8, is_result: bool) u32 {
     return b.errorCode(s, errors, e);
 }
 
-/// Writes a native promise for what a script's async method gave back to `value`. A pending
-/// exception rejects it when `r` is null.
+/// Writes to `value` a native promise for what a script's async method gave back. A null `r` rejects with the pending exception.
 fn settledPromise(b: *Binder, t: *Trait, slot: u32, value: [*]u8, r: ?Value) u32 {
     const s = t.schema;
     const ok, const errors = script.payload(t.methods[slot]);

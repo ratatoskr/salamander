@@ -1,6 +1,4 @@
-//! How generated Zig and scripts find existing code a schema declares, like a game's functions found
-//! by signature, and read memory that might not be there. Each binary asks its own locator, set by
-//! whatever loads it. Addresses are found once, then kept.
+//! How generated Zig and scripts find existing code a schema declares, through each binary's locator. Found once, then kept.
 
 const std = @import("std");
 

@@ -103,8 +103,7 @@ pub fn setReturns(frame: *Frame, _: dyn.Signature, bits: *const [dyn.max_results
 /// The result goes in both RAX and XMM0.
 pub fn Detour(comptime handler: *const fn (frame: *Frame) callconv(.c) void) type {
     return struct {
-        // Not `noreturn`, it returns to its caller, and an optimizer
-        // mustn't drop what comes after a call to it
+        // Not `noreturn`: it returns, so code after a call to it mustn't be dropped
         pub fn entry() callconv(.naked) void {
             asm volatile (
                 \\.intel_syntax noprefix

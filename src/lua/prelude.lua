@@ -1,5 +1,4 @@
--- Promises and tasks, for async methods. Runs once as the binder starts, given what it needs from
--- Zig, and gives back what Zig and scripts use. Adapted from wraith's.
+-- Promises and tasks for async methods. Runs once as the binder starts. Adapted from wraith's.
 local report, traceback = ...
 
 local create, resume, running, status, yield = coroutine.create, coroutine.resume, coroutine.running, coroutine.status, coroutine.yield

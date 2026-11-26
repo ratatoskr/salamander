@@ -1,16 +1,5 @@
 //! A schema as C# over `Salamander.cs`, in two layers like the Zig one. Needs `AllowUnsafeBlocks`.
-//!
-//! `<Namespace>.Raw` is exactly what crosses, laid out by the same plan as Zig and C: explicit layout
-//! structs, `[InlineArray]`s, a named struct per slice, value optional and array, and per trait a
-//! struct over its `delegate* unmanaged` table with `[UnmanagedCallersOnly]` thunks to implement it.
-//!
-//! Over that is plain C#. Schema namespaces are C# ones, names are PascalCase, strings are strings,
-//! slices are spans and arrays, results throw, async methods give tasks and callbacks are delegates.
-//! Each trait is a class wrapping its raw object with an `I<Trait>` to implement it, and structs
-//! holding what has to be converted get a class twin of their raw struct. Types that cross as they
-//! are, like plain structs and enums, are shared by both.
-//!
-//! Only blittable types and function pointers cross, so it's the same under CoreCLR and NativeAOT.
+//! `<Namespace>.Raw` is exactly what crosses, laid out like Zig and C. Over it is plain C# with classes, spans, tasks and delegates.
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
@@ -33,14 +22,11 @@ pub const Options = struct {
     /// The bundle's text, so `aliases` can tell which file each thing came from.
     source: []const u8 = "",
     aliases: []const Alias = &.{},
-    /// Traits the host gives one of, by full name, like a dependency's services. Each gets an
-    /// `Instance` that reads `Salamander.Singletons`.
+    /// Traits the host gives one of, by full name. Each gets an `Instance` reading `Salamander.Singletons`.
     singletons: []const []const u8 = &.{},
 };
 
-/// Everything declared in bundled files whose names start with `prefix`, like `wraith/`, has already
-/// been written somewhere else, so it's used from there. `namespace` is that file's home namespace,
-/// where its `Raw` and anything without a schema namespace are.
+/// Files whose names start with `prefix` were written elsewhere, home namespace `namespace`, and are used from there.
 pub const Alias = struct {
     prefix: []const u8,
     namespace: []const u8,
@@ -69,8 +55,7 @@ const keywords = [_][]const u8{
     "unsafe",   "ushort",   "using",    "virtual",  "void",      "volatile", "while",
 };
 
-/// What raw helpers and thunks call their own locals, or the object's fields, so parameters don't.
-/// The plain layer's own locals all start with `__` instead, so its parameters keep their names.
+/// Names raw helpers and thunks use for locals, so parameters avoid them. Plain-layer locals start with `__`.
 const helper_locals = [_][]const u8{ "self", "t", "r", "e", "data", "table", "f", "impl" };
 
 /// What every raw trait struct has, so its methods can't be called that.
@@ -213,9 +198,7 @@ const Gen = struct {
         return if (ns.len > 0) g.fmt("{s}.", .{ns}) catch "" else "";
     }
 
-    /// Where a plain type is, like `global::Game.Scene.Node`, with `prefix` before its last part. Its
-    /// schema namespace is its C# one, and one without goes in the home namespace, its alias's if it
-    /// has one.
+    /// Where a plain type is, like `global::Game.Scene.Node`, with `prefix` before its last part.
     fn plainRefWith(g: *Gen, n: []const u8, prefix: []const u8) Error![]const u8 {
         const end = Schema.namespaceEnd(n);
         const path = if (end) |e| try g.fmt("{s}.", .{n[0..e]}) else g.nsDotOf(n);
@@ -772,8 +755,7 @@ const Gen = struct {
         try g.print("    }}\n", .{});
     }
 
-    /// A pointer static gives what's stored there, and an OrFail that throws while it's null. Anything
-    /// else gives a pointer to it.
+    /// A pointer static gives what's stored there, with an OrFail that throws on null. Anything else gives a pointer to it.
     fn declaredStatic(g: *Gen, n: []const u8, owner: []const u8, v: *const Schema.Static) Error!void {
         const full = try g.declaredName(owner, v.name);
         const vn = try g.member(n, try g.pascal(leafOf(v.name)));
@@ -1300,8 +1282,7 @@ const Gen = struct {
         try g.print("{s}var __r = {s}.{s}({s});\n{s}{s}return {s};\n", .{ indent, target, mn, args.written(), after.written(), indent, try g.lift(m.signature.ret, "__r", "true") });
     }
 
-    /// A raw method that calls `invoke`, a plain one, converting both ways. `arena` is which of
-    /// the adapter's arenas holds what it gives back.
+    /// A raw method calling plain `invoke`, converting both ways. `arena` is the adapter's arena for what it gives back.
     fn adapterMethod(g: *Gen, m: *const Schema.Method, invoke: []const u8, arena: usize) Error!void {
         const p = try g.params(m);
         try g.print("\n        public {s} {s}({s})\n        {{\n", .{ try g.retType(m), try g.ident(m.name), p.decl });
@@ -1365,8 +1346,7 @@ const Gen = struct {
         , .{ sal, sal, @max(count, 1), sal });
     }
 
-    /// The plugin's one of it, for a `[Root]` trait and each trait its methods give, like
-    /// `Wraith.Tweaks.Instance`. The root's is set as the plugin starts.
+    /// The plugin's instance, for a `[Root]` trait and the traits its methods give. The root's is set as the plugin starts.
     fn instance(g: *Gen, t: *const Schema.Trait, n: []const u8) Error!void {
         if (t.root) return g.print(
             \\

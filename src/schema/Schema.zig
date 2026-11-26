@@ -15,8 +15,7 @@ constants: []const Constant = &.{},
 functions: []const Method = &.{},
 /// Existing code's globals, found the same way.
 statics: []const Static = &.{},
-/// Indices of the first `type_order.len` types, sorted by name, so `findType` needn't look at each.
-/// Types after them are looked at one by one.
+/// Indices of the first `type_order.len` types sorted by name, for `findType`. Later ones are searched one by one.
 type_order: []const u32 = &.{},
 
 /// Byte offset into the source, for messages.
@@ -168,8 +167,7 @@ pub const Ref = union(enum) {
     pub const Array = struct {
         len: usize,
         child: *const Ref,
-        /// `T[count]`, a struct field whose length is the field `count` next to it, read when it's
-        /// used. Its `len` is 0, so what doesn't read it sees an empty array.
+        /// `T[count]`, a field whose length is the sibling field `count`, read when used. `len` is 0.
         count: ?[]const u8 = null,
 
         /// As long as `n`, now it's been read.
@@ -229,8 +227,7 @@ pub const Param = struct {
     at: Pos = 0,
     /// The objects in it outlive the call. Otherwise they're borrowed for it, like strings.
     keep: bool = false,
-    /// `inout T` crosses as a `T*` the callee can change. Scripts see their own object written back after,
-    /// or a `{ value }` box for non-objects. `inout ?T` is `?T*` so scripts can pass null.
+    /// `inout T` crosses as a changeable `T*`, `inout ?T` as `?T*`. Scripts get objects written back, or a `{ value }` box.
     inout: bool = false,
 
     /// What an `inout` one points at.
@@ -337,8 +334,7 @@ pub const Type = struct {
 pub const Struct = struct {
     base: ?[]const u8 = null,
     fields: []const Field = &.{},
-    /// Its existing code's methods, an impl of its own. Each is a `[Virtual(n)]` slot or found by a
-    /// tool's annotations, and takes `this` first unless static.
+    /// Methods of its existing code: `[Virtual(n)]` slots or found by a tool's annotations. `this` first unless static.
     methods: []const Method = &.{},
     /// Globals that belong with it, like `Player.instance`.
     statics: []const Static = &.{},
@@ -408,8 +404,7 @@ pub const Trait = struct {
     bases: []const []const u8 = &.{},
     methods: []const Method = &.{},
     annotations: []const Annotation = &.{},
-    /// From `[Root]`: the host hands each plugin one of it, and each of its `accessors` gives one of
-    /// its namespace's objects, like `Wraith.tweaks()`.
+    /// From `[Root]`: each plugin gets one, whose `accessors` give its namespace's objects, like `Wraith.tweaks()`.
     root: bool = false,
 };
 
@@ -427,8 +422,7 @@ pub const Accessor = struct {
     method: *const Method,
 };
 
-/// The root method that gives one of `trait_name`, for its static `instance`. The first if there are
-/// several.
+/// The first root method giving a `trait_name`, for its static `instance`.
 pub fn accessorOf(s: Schema, trait_name: []const u8) ?Accessor {
     for (s.traits) |*t| {
         if (!t.root) continue;
@@ -500,8 +494,7 @@ pub const cancelled_code: u32 = std.math.maxInt(u32) - 2;
 pub const unsupported_code: u32 = std.math.maxInt(u32) - 1;
 pub const gone_code: u32 = std.math.maxInt(u32);
 
-/// Where `name`'s namespace ends, like the last dot in `Scene.Node`, skipping dots in a generic's
-/// `<..>`. Null for a name at the top.
+/// The last dot in `name`, skipping dots in a generic's `<..>`. Null at the top.
 pub fn namespaceEnd(name: []const u8) ?usize {
     var depth: usize = 0;
     var i = name.len;
@@ -517,8 +510,7 @@ pub fn namespaceEnd(name: []const u8) ?usize {
     return null;
 }
 
-/// A name as one identifier, for languages without namespaces or generics. `Game.Player` is
-/// `Game_Player` and `StdVector<Item*, u32[4]>` is `StdVector_ItemPtr_u32_4`. Plain names stay as they are.
+/// A name as one identifier, like `Game_Player` or `StdVector_ItemPtr_u32_4`, for languages without namespaces or generics.
 pub fn writeFlatName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
     var i: usize = 0;
     while (i < name.len) : (i += 1) {
@@ -632,9 +624,7 @@ pub fn traitHash(s: Schema, t: *const Trait) u64 {
     return f.h;
 }
 
-/// The full name `written` means from namespace `ns`, the way names in schemas are found: `ns` and
-/// each one around it first, then as it is. So `Player.heal` from `Kai` is `Kai.Player.heal` if
-/// there's one. In `buf`, or `written` itself.
+/// The full name `written` means from namespace `ns`: tried in `ns` and each one around it, then as is. In `buf`, or `written` itself.
 pub fn nameFrom(s: Schema, buf: []u8, ns: []const u8, written: []const u8) []const u8 {
     var at = ns;
     while (at.len > 0) {
@@ -668,8 +658,7 @@ pub fn findType(s: Schema, name: []const u8) ?*const Type {
     return null;
 }
 
-/// Where the type `path` starts with ends, the longest that is one, like `Game.Party` in
-/// `Game.Party.members.count`. Null if it doesn't start with one followed by a `.`.
+/// The longest type `path` starts with, like `Game.Party` in `Game.Party.members.count`. Null unless a `.` follows it.
 pub fn typePrefix(s: Schema, path: []const u8) ?usize {
     var end = path.len;
     while (std.mem.lastIndexOfScalar(u8, path[0..end], '.')) |dot| : (end = dot) {
@@ -749,8 +738,7 @@ pub const Function = struct {
     }
 };
 
-/// `spawn` or `Player.heal`, where a struct's comes from it or its bases. Names can be in
-/// namespaces, like `Game.spawn` or `Game.Player.heal`.
+/// `spawn` or `Player.heal`, where a struct's comes from it or its bases. Names can be namespaced.
 pub fn findFunction(s: Schema, name: []const u8) ?Function {
     for (s.functions) |*f| if (std.mem.eql(u8, f.name, name)) return .{ .method = f };
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;

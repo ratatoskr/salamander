@@ -164,8 +164,7 @@ pub fn pointee(s: Schema, r: Ref, address: usize) View {
 /// How far a pointer to text is read.
 pub const max_text = 4096;
 
-/// Copied out of memory in one read, for a script's plain copy. Saving writes back only what changed
-/// since the copy or last save, so what the game changed meanwhile stays.
+/// Copied out in one read. Saving writes back only what changed since, so the game's own changes stay.
 pub const Copy = struct {
     gpa: std.mem.Allocator,
     view: View,

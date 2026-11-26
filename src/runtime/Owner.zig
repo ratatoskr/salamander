@@ -1,6 +1,5 @@
 //! Who something belongs to, like a plugin or a script. Its tables stop calling into it once it closes.
-//! Callers enter a table's owner before calling through it, so its code can't go mid-call.
-//! The host keeps owners for good since objects may still point at them. Extern so any language can do the same.
+//! Callers enter it around each call so its code can't go mid-call. Kept for good, and extern so any language can do the same.
 
 const std = @import("std");
 
@@ -41,8 +40,7 @@ pub const Owner = extern struct {
         _ = @atomicRmw(u32, &o.calls, .Or, closed_bit, .acq_rel);
     }
 
-    /// Closes it, then waits for calls in flight so its code can go.
-    /// Never from inside one of the owner's calls, or it waits on itself.
+    /// Closes it and waits for calls in flight. Never from inside one of its own calls, or it waits on itself.
     pub fn drain(o: *Owner) void {
         o.close();
         while (@atomicLoad(u32, &o.calls, .acquire) & ~closed_bit != 0) std.Thread.yield() catch {};

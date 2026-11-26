@@ -1,5 +1,4 @@
 //! Work for one thread, `core.Queue`. Any thread posts, the owning thread runs it with `poll`.
-//! Script hosts poll theirs so promises settled elsewhere resume on the script's thread.
 //! It's the host's, so every binary posts to the same one.
 
 const std = @import("std");

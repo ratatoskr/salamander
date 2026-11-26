@@ -1,8 +1,5 @@
 //! A schema as a C header over `salamander.h`, laid out by the same plan as Zig and checked with `_Static_assert`s.
 //! Ints, enums, error sets and bitfields are backing ints with `#define`d values, since C's own differ between compilers.
-//! Each trait gets its table, info and inline helpers. Code a schema declares in existing code, like a
-//! game's `[Sig]` functions and statics, gets its full name to find it by and, for functions, a
-//! pointer type to call it through.
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
@@ -26,8 +23,7 @@ pub const Options = struct {
     core: bool = false,
 };
 
-/// What files starting with `prefix` declare comes from `include`, like `wraith/` from `wraith.h`, made
-/// from those files with the same prefix.
+/// What files starting with `prefix` declare comes from `include`, like `wraith/` from `wraith.h`.
 pub const Alias = struct {
     prefix: []const u8,
     include: []const u8,
@@ -388,8 +384,7 @@ const Gen = struct {
         try g.print("\n#endif\n", .{});
     }
 
-    /// Existing code the schema declares: each one's full name, for whatever finds it, and a pointer
-    /// type for functions, with `self` first for a struct's.
+    /// Existing code the schema declares: each one's full name, and a pointer type for functions, `self` first for methods.
     fn declared(g: *Gen) Error!void {
         const s = g.s;
         for (s.types) |*t| if (t.kind == .@"struct" and !g.aliased(t.at)) {
@@ -600,8 +595,7 @@ const Gen = struct {
         try g.print(" = self.table->{s}({s});\n    sal_leave(self.table->salamander_owner);\n    return r;\n}}\n", .{ m.name, args.written() });
     }
 
-    /// `sal_get_Trait`, `sal_provide_Trait` and `sal_own_Trait`, over the host's, with this header's
-    /// version of the trait. Under `sal_` so they can't clash with the trait's own methods, like a `get`.
+    /// `sal_get_Trait`, `sal_provide_Trait` and `sal_own_Trait` over the host's, prefixed so they can't clash with the trait's methods.
     fn hostHelpers(g: *Gen, n: []const u8) Error!void {
         const host = g.core("Host");
         for ([_][]const u8{ "get", "provide", "own" }) |h| try g.claim(try g.fmt("sal_{s}_{s}", .{ h, n }));

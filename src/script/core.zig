@@ -21,9 +21,8 @@ pub const Policy = struct {
     how: *const fn (ctx: ?*anyopaque) Gate.How,
 };
 
-/// Where a script carries on once a native promise it awaits settles. Called on the thread that
-/// settled it, with the task to run there or post on, which copes with the script being gone. So
-/// `ctx` has to outlive the script. Null runs every one from the script's own queue.
+/// Where a script carries on once an awaited native promise settles. Called on the settling thread with a task to run or post.
+/// `ctx` must outlive the script. Null runs every one from the script's own queue.
 pub const Resume = struct {
     ctx: ?*anyopaque = null,
     run: *const fn (ctx: ?*anyopaque, task: rt.Task) void,
@@ -60,8 +59,7 @@ pub const Module = struct {
 
 pub const TraitError = error{ OutOfMemory, NoSuchTrait, TooManyMethods };
 
-/// Finds code a schema declares in existing code, like a game's, the same as generated Zig does.
-/// Failures go through the host's `explain`.
+/// Finds code a schema declares, like a game's, as generated Zig does. Failures go through the host's `explain`.
 pub const Locator = rt.declared.Locator;
 
 pub const LocateError = anyerror;
@@ -127,8 +125,7 @@ pub fn Core(comptime L: type) type {
 
         pub const SignatureError = salamander_schema.SignatureError || TraitError || error{Unsupported};
 
-        /// Kept objects let go together. Closing its owner stops calls before anything's freed.
-        /// The owner and tables stay in host memory for good, so don't make these too often.
+        /// Kept objects let go together. The owner and tables stay in host memory for good, so don't make many.
         pub const Scope = struct {
             owner: *rt.Owner,
             tables: std.AutoHashMapUnmanaged(*Trait, *const anyopaque) = .empty,
@@ -594,9 +591,7 @@ pub fn Core(comptime L: type) type {
             self.gate.leave();
         }
 
-        /// Has `settled(a)` run once `promise` settles, from `queue`, or through `resume_on` from the
-        /// thread that settled it. `a` keeps the hook in its `resume_on`, since the script may be gone
-        /// by then, and `settled` has to cope with that.
+        /// Runs `settled(a)` once `promise` settles, from `queue` or through `resume_on`. `settled` must cope with the script being gone.
         pub fn thenSettled(self: *Self, promise: rt.core.Promise, a: anytype, comptime settled: fn (@TypeOf(a)) void) void {
             const r = self.resume_on orelse return promise.then(rt.Task.init(a, settled), self.queue.raw());
             a.resume_on = r;
@@ -622,8 +617,7 @@ pub fn Core(comptime L: type) type {
             return s;
         }
 
-        /// Lets its objects go, held or not. During a call into the script that waits till the queue's
-        /// polled. Calls waiting to get in give up, so it never waits on them.
+        /// Lets its objects go. During a call into the script that waits till the queue's polled. Calls waiting to get in give up.
         pub fn closeScope(self: *Self, s: *Scope) void {
             std.debug.assert(s != self.root);
             const at = std.mem.indexOfScalar(*Scope, self.scopes.items, s) orelse return;
@@ -724,8 +718,7 @@ pub fn Core(comptime L: type) type {
     };
 }
 
-/// Per thread, so another thread calling in can't free it before the caller's copied it.
-/// Good till the thread's next call into any script.
+/// Per thread, so another thread can't free it before the caller's copied it. Good till the thread's next call into any script.
 threadlocal var returns: ?std.heap.ArenaAllocator = null;
 /// Across every binder.
 threadlocal var calls_in: u32 = 0;
@@ -755,8 +748,7 @@ pub fn withExplanation(host: rt.Host, name: []const u8) []const u8 {
     return std.fmt.bufPrint(&explained_buf, "{s}: {s}", .{ name, why }) catch name;
 }
 
-/// Whether scripts get an `inout` value in a `{ value }` box. Structs, unions and arrays are objects
-/// already, so they're written back into.
+/// Whether scripts get an `inout` value in a `{ value }` box. Structs, unions and arrays are written back into.
 pub fn inoutBoxed(s: Schema, r: Schema.Ref) bool {
     return switch (r) {
         .named => |n| if (s.findType(n)) |t| !(t.kind == .@"struct" or t.kind == .@"union") else true,
@@ -774,9 +766,7 @@ pub fn explainThrown(host: rt.Host, schema: ?Schema, errors: ?[]const u8, code: 
     host.raw().explain(name, why);
 }
 
-/// `Unsupported` for names nobody knows.
-/// What scripts call a single object of `trait_name`: its last part with a small first letter, like
-/// `camera` for `Freecam.Camera`. In `buf`.
+/// What scripts call a single object of `trait_name`, like `camera` for `Freecam.Camera`. In `buf`.
 pub fn singletonName(buf: []u8, trait_name: []const u8) []const u8 {
     const leaf = trait_name[if (Schema.namespaceEnd(trait_name)) |e| e + 1 else 0..];
     const n = @min(leaf.len, buf.len);

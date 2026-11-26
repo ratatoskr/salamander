@@ -1,5 +1,4 @@
-//! hostfxr, .NET's host library, and the delegates it hands out. From hostfxr.h and
-//! coreclr_delegates.h in dotnet/runtime.
+//! hostfxr, .NET's host library, and its delegates, from hostfxr.h and coreclr_delegates.h.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -8,8 +7,7 @@ const builtin = @import("builtin");
 pub const Char = if (builtin.os.tag == .windows) u16 else u8;
 pub const Str = [*:0]const Char;
 
-/// How hostfxr's delegates are called. Stdcall on 32-bit Windows, which .NET picked. They only
-/// return ints, so Zig's trouble with stdcall struct returns doesn't reach them.
+/// How hostfxr's delegates are called, stdcall on 32-bit Windows. They only return ints, so Zig's stdcall struct return bug can't bite.
 pub const delegate_cc: std.builtin.CallingConvention = if (builtin.os.tag == .windows and builtin.cpu.arch == .x86) .{ .x86_stdcall = .{} } else .c;
 
 pub const Handle = *opaque {};

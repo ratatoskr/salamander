@@ -53,8 +53,7 @@ pub const Host = extern struct {
         return @ptrCast(@alignCast(self.raw().owner(name) orelse return error.OutOfMemory));
     }
 
-    /// `obj` with the host's copy of its table, which stops calling into it once `o` closes.
-    /// A table that already has an owner keeps it.
+    /// `obj` with the host's copy of its table, which stops calling into it once `o` closes. An existing owner is kept.
     pub fn own(self: Self, obj: anytype, o: ?*Owner) error{OutOfMemory}!@TypeOf(obj) {
         const out = self.raw().adopt(.of(obj), ownerOf(o));
         if (out.table == null) return error.OutOfMemory;
@@ -67,8 +66,7 @@ pub const Host = extern struct {
         return @ptrCast(@alignCast(out.table orelse return error.OutOfMemory));
     }
 
-    /// `obj`, which might be another version of `Desc`, as one laid out for this binary's.
-    /// No table for one from another ABI.
+    /// `obj`, maybe another version of `Desc`, laid out for this binary's. No table across ABIs.
     pub fn adapt(self: Self, comptime Desc: type, obj: anytype) rt.Object(Desc) {
         if (obj.table == null) return .{};
         return self.raw().adapt(.of(obj), infoPtr(Desc)).as(rt.Object(Desc));
@@ -82,8 +80,7 @@ pub const Host = extern struct {
         return .{ p, resolver };
     }
 
-    /// Findable as `name` till it's withdrawn or its owner closes. Its table needs an owner,
-    /// so the host never points at a plugin that's gone.
+    /// Findable as `name` till withdrawn or its owner closes. Its table needs an owner, so the host never points at a gone plugin.
     pub fn provide(self: Self, name: []const u8, major: u32, obj: anytype) ProvideError!void {
         if (obj.table == null) return;
         return switch (self.raw().provide(name, major, .of(obj))) {
@@ -105,9 +102,7 @@ pub const Host = extern struct {
         return out.as(rt.Object(Desc));
     }
 
-    /// For a thread to poll, like a script's.
-    /// Done holding `obj`, from a `keep` parameter or a return. Does nothing unless its
-    /// table's maker asked with `releasable`.
+    /// Done holding `obj`, from a `keep` parameter or a return. Does nothing unless its table's maker asked with `releasable`.
     pub fn release(self: Self, obj: anytype) void {
         if (obj.table == null) return;
         self.raw().release(.of(obj));

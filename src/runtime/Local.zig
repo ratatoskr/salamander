@@ -1,6 +1,5 @@
 //! The host, what `Host` calls into. A host program has one and hands `host()` to each plugin.
-//! Everything here is kept for good since plugins may still point at it. Plugin tables are copied in
-//! when adopted or provided, so a binary can go once its owner's drained.
+//! Everything's kept for good and plugin tables are copied in, so a binary can go once its owner's drained.
 
 const Local = @This();
 
@@ -100,8 +99,7 @@ fn copyInfo(l: *Local, info: *const rt.Info) ?*const rt.Info {
     return copy;
 }
 
-/// Copies a table and its info so only its code points into the binary that made it.
-/// One that already has an owner keeps it, so a copy never gets past its maker's guard.
+/// Copies a table and its info so only its code points into its binary. An existing owner is kept.
 fn adoptTable(l: *Local, table: *const anyopaque, o: ?*Owner) ?*const anyopaque {
     const header = rt.headerOf(table);
     const info = header.info;
@@ -113,8 +111,7 @@ fn adoptTable(l: *Local, table: *const anyopaque, o: ?*Owner) ?*const anyopaque 
     return out.ptr;
 }
 
-/// Same trait version gives the table back. Otherwise methods match by name and signature
-/// and the rest are null. Made once per pair. Null across ABIs.
+/// Same version gives the table back, else methods match by name and signature, the rest null. Made once per pair, null across ABIs.
 fn adaptTable(l: *Local, table: *const anyopaque, want: *const rt.Info) ?*const anyopaque {
     const have = rt.headerOf(table).info;
     if (have.abi != want.abi) return null;

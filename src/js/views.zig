@@ -314,8 +314,7 @@ pub fn snapshot(b: *Binder, v: View) convert.Error!Value {
     return copied;
 }
 
-/// Writes back what changed since the snapshot was taken or last saved, and gives how many.
-/// Text isn't written.
+/// Writes back what changed since the snapshot or last save, except text, and gives how many.
 pub fn save(b: *Binder, copied: Value) convert.Error!usize {
     const ctx = b.ctx;
     const holder = c.JS_GetProperty(ctx, copied, b.copy_atom);

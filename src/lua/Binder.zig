@@ -221,8 +221,7 @@ pub fn runJobs(b: *Binder) void {
     if (lua.pcall(l, 1, 0, 0) != lua.ok) b.reportTop(l);
 }
 
-/// Runs the function under `nargs` args as a task so it can await, and leaves its promise. False with
-/// nil left if it failed before it first waited, the error pending for `takeError`.
+/// Runs the function under `nargs` args as a task and leaves its promise. False with nil if it failed before first waiting.
 pub fn startTask(b: *Binder, l: *State, nargs: c_int) bool {
     lua.pushRef(l, b.prelude.start);
     lua.insert(l, -nargs - 2);
@@ -525,8 +524,7 @@ fn builtinTypeOfC(l_: ?*State) callconv(.c) c_int {
     return 1;
 }
 
-/// `load(name, text)` loads a `.sal` written while running, in place of what was loaded as `name`.
-/// Gives what it declares, like the `schema` module.
+/// `load(name, text)` loads a `.sal` in place of what was loaded as `name`, and gives what it declares.
 fn builtinLoadC(l_: ?*State) callconv(.c) c_int {
     const l = l_.?;
     const b = upBinder(l);
@@ -638,8 +636,7 @@ fn builtinFnC(l_: ?*State) callconv(.c) c_int {
     return b.builtinFn(l) catch |e| b.raise(l, e);
 }
 
-/// `fn(signature, f)` types `f`, so native code taking an object gets a function value of that type.
-/// A declared function works as its signature too.
+/// `fn(signature, f)` types `f` as a function value of that signature, which can be a declared function.
 fn builtinFn(b: *Binder, l: *State) Error!c_int {
     if (lua.typeOf(l, 2) != c.LUA_TFUNCTION) return b.fail(l, "fn takes a signature and a function", .{});
     const sig = try b.signatureArg(l, 1);
@@ -798,8 +795,7 @@ pub fn locateFailed(b: *Binder, l: *State, name: []const u8, e: anyerror) Error 
     return b.fail(l, "{s}: {s}", .{ name, script.withExplanation(b.core.host, @errorName(e)) });
 }
 
-/// Calls the declared function `name` with the arguments from `first` on. A method that takes `this`
-/// gets it from the first.
+/// Calls the declared function `name` with the arguments from `first` on, `this` first for methods.
 fn callDeclared(b: *Binder, l: *State, name: []const u8, first: c_int) Error!c_int {
     const found = b.core.declared(name) orelse return b.fail(l, "{s} isn't declared", .{name});
     const f = switch (found) {
@@ -816,8 +812,7 @@ fn callDeclared(b: *Binder, l: *State, name: []const u8, first: c_int) Error!c_i
     return b.callAt(l, sig.trait, sig.function, .{ .declared = .{ .name = name, .found = f } }, from);
 }
 
-// The `schema` module, for code that already exists like a game's. Structs are classes. Statics read
-// memory each time, methods take `this` first and `at(address)` gives a view.
+// The `schema` module, for existing code like a game's. Structs are classes, statics read memory each time.
 
 pub const schema_module = "schema";
 
@@ -844,8 +839,7 @@ fn callDeclaredC(l_: ?*State) callconv(.c) c_int {
 
 // Namespaces: each one at the top, like `Wraith`, and what `[Root]` objects give
 
-/// The namespaces at the top of the table at `all`, from `pushSchema`, as globals. Gives the name of
-/// one that would hide a global Lua has already, copied into `clash`, setting none.
+/// Sets the top namespaces of the table at `all` as globals, unless one would hide a built-in, whose name goes in `clash`.
 pub fn globalsFrom(b: *Binder, l: *State, all: c_int, clash: []u8) Error!?[]const u8 {
     _ = b;
     if (c.lua_checkstack(l, 8) == 0) return error.OutOfMemory;
@@ -882,9 +876,7 @@ fn addRoot(out: *std.ArrayList([:0]const u8), a: std.mem.Allocator, name: []cons
     try out.append(a, try a.dupeSentinel(u8, root, 0));
 }
 
-/// A `[Root]` object of `trait` in `m`, on the namespaces in the table at `all`. Each accessor, like
-/// `tweaks()`, is a function on its namespace, like `Wraith.tweaks()`, and each trait one gives has
-/// `instance()` the same. So does the root's own trait, giving it.
+/// Puts a `[Root]` object's accessors, like `Wraith.tweaks()`, on its namespace, and `instance()` on the traits they give and its own.
 pub fn exposeRoot(b: *Binder, l: *State, all: c_int, m: *const Module, trait_name: []const u8, obj: rt.AnyObject) Error!void {
     if (c.lua_checkstack(l, 12) == 0) return error.OutOfMemory;
     const g = c.lua_absindex(l, all);
@@ -1064,8 +1056,7 @@ fn addressC(l_: ?*State) callconv(.c) c_int {
     return 1;
 }
 
-/// Pushes the table at `path` under `all`, like `Scene.Node`, made with any on the way if they're
-/// not there. Each made one reads and writes `path`'s statics, like a struct's class does.
+/// Pushes the table at `path` under `all`, made as needed. Made ones read and write `path`'s statics.
 fn pushTableIn(b: *Binder, l: *State, all: c_int, path: []const u8) Error!void {
     if (c.lua_checkstack(l, 4) == 0) return error.OutOfMemory;
     var leaf = path;
@@ -1087,8 +1078,7 @@ fn pushTableIn(b: *Binder, l: *State, all: c_int, path: []const u8) Error!void {
     lua.remove(l, in);
 }
 
-/// A metatable whose `__index` and `__newindex` read and write the statics of `owner`, or the
-/// top-level ones for "".
+/// A metatable reading and writing `owner`'s statics, or the top-level ones for "".
 fn pushStatics(b: *Binder, l: *State, owner: []const u8) void {
     c.lua_createtable(l, 0, 2);
     const mt = lua.top(l);

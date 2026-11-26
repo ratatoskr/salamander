@@ -486,8 +486,7 @@ fn load(ctx_: ?*qjs.Context, name_: [*c]const u8, opaque_: ?*anyopaque) callconv
     return def;
 }
 
-/// For CommonJS libraries that set `exports` or `module.exports`. Each runs once, found through
-/// the resolver like imports are.
+/// For CommonJS libraries setting `exports` or `module.exports`. Each runs once, found through the resolver.
 fn require(ctx_: ?*qjs.Context, this: Value, argc: c_int, argv: [*c]Value) callconv(.c) Value {
     _ = this;
     const ctx = ctx_.?;
@@ -534,8 +533,7 @@ fn require(ctx_: ?*qjs.Context, this: Value, argc: c_int, argv: [*c]Value) callc
     return qjs.get(ctx, module_, "exports");
 }
 
-/// A native module, the schema or the builtins as one object, like importing all of it. Made once.
-/// Null if `name` is none of them.
+/// A native module, the schema or the builtins as one object, made once. Null for anything else.
 fn requireNative(self: *Script, ctx: *qjs.Context, name: []const u8) ?Value {
     if (self.isNamespaces(name)) return c.JS_DupValue(ctx, self.ns_value);
     const native = self.natives.find(name);

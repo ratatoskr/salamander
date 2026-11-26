@@ -1,5 +1,4 @@
-//! SysV x64 `dyn`, for Linux and macOS. Ints go in RDI, RSI, RDX, RCX, R8 and R9 and floats in XMM0 to XMM7,
-//! counted apart. The rest go on the stack, 8 bytes each. Results come back in RAX then RDX and XMM0 then XMM1.
+//! SysV x64 `dyn`, Linux and macOS. Ints in RDI, RSI, RDX, RCX, R8, R9, floats in XMM0-XMM7, the rest on the stack.
 //! Inline assembly is AT&T with every size spelled out, since Zig's own x64 backend takes that.
 
 const dyn = @import("root.zig");
@@ -131,15 +130,14 @@ pub fn setReturns(frame: *Frame, sig: dyn.Signature, bits: *const [dyn.max_resul
     }
 }
 
-// What moves XMM registers is in sysv64.S, since Zig's own x64 backend can't do it in inline assembly
-// and skips global assembly. The XMM helpers find the frame 8 bytes up, past their return address.
+// XMM moves are in sysv64.S, since Zig's x64 backend can't do them inline and skips global assembly.
+// The XMM helpers find the frame 8 bytes up, past their return address.
 extern fn salamander_sysv64_save_xmm() callconv(.naked) void;
 extern fn salamander_sysv64_load_xmm() callconv(.naked) void;
 
 pub fn Detour(comptime handler: *const fn (frame: *Frame) callconv(.c) void) type {
     return struct {
-        // Not `noreturn`, it returns to its caller, and an optimizer
-        // mustn't drop what comes after a call to it
+        // Not `noreturn`: it returns, so code after a call to it mustn't be dropped
         pub fn entry() callconv(.naked) void {
             asm volatile (
                 \\pushq %%rbp

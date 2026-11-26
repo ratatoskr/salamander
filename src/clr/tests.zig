@@ -1,5 +1,4 @@
-//! Starts a real runtime, so needs the .NET 10 SDK to build the probe. Skipped without it. A process
-//! only gets one runtime, so every test shares it.
+//! Starts a real runtime, so needs the .NET 10 SDK and skips without it. Every test shares the one runtime.
 
 const std = @import("std");
 const clr = @import("root.zig");

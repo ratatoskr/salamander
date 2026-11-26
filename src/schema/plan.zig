@@ -178,8 +178,7 @@ pub fn how(s: Schema, impl: *const Schema.Impl, method: *const Schema.Method) Ho
     return .missing;
 }
 
-/// Whether a type reaches `to` through what it holds, by value or pointer.
-/// A comptime pointer to something that reaches back is lazy, or the type would contain itself.
+/// Whether a type reaches `to` through what it holds. A comptime pointer to something reaching back is lazy.
 pub fn reaches(s: Schema, from: []const u8, to: []const u8) bool {
     var seen: [256][]const u8 = undefined;
     var len: usize = 0;

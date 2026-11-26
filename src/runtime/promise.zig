@@ -1,6 +1,5 @@
-//! `async` results. A promise is a `Promise` trait object, and whoever does the work holds its `Resolver`.
-//! Both point at one future the host keeps till both let go. Waiters run on the settling thread, or
-//! where the resolver says they carry on.
+//! `async` results: a `Promise` for the waiter and a `Resolver` for the worker, over one future the host keeps.
+//! Waiters run on the settling thread, or where the resolver says they carry on.
 
 const std = @import("std");
 
@@ -24,8 +23,7 @@ const Held = struct {
     }
 };
 
-/// What the last value this thread took points at, kept till it takes another. Per thread in the
-/// host's binary, since futures are the host's.
+/// What this thread last took points at, kept till it takes another. Per thread in the host's binary.
 threadlocal var taken: ?*Held = null;
 
 /// What a value's bytes sit after, so one table works for every type.
@@ -94,8 +92,7 @@ const Future = extern struct {
         return f.bits.load(.acquire) & settled_bit != 0;
     }
 
-    /// The code, with the value copied to `out` if it's 0. Only once settled. What the value points
-    /// at moves to this thread, good till it takes another.
+    /// The code, with the value copied to `out` if 0. Only once settled. What it points at is good till this thread takes another.
     pub fn take(f: *Future, out: ?*anyopaque) u32 {
         if (f.code == 0) if (out) |o| {
             @memcpy(@as([*]u8, @ptrCast(o))[0..f.size], f.value()[0..f.size]);
@@ -317,8 +314,7 @@ pub fn Resolver(comptime T: type, comptime Errors: ?type) type {
             self.obj().reject(rt.lowerError(Errors, err));
         }
 
-        /// For what the value points at, like its text, kept with it. The taker has it till its
-        /// thread takes another. Before settling only.
+        /// Memory kept with the value, for what it points at, good till the taker's thread takes another. Before settling only.
         pub fn allocator(self: *const Self) std.mem.Allocator {
             return holding(@ptrCast(self));
         }
@@ -333,8 +329,7 @@ pub fn Resolver(comptime T: type, comptime Errors: ?type) type {
             return self.obj().cancelled();
         }
 
-        /// Before settling. Waiters with no queue of their own carry on from `where`, even ones
-        /// that come after it's settled.
+        /// Before settling. Waiters with no queue of their own carry on from `where`, even late ones.
         pub fn carryOn(self: Self, where: rt.Queue) void {
             self.obj().carryOn(where.raw());
         }

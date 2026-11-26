@@ -137,8 +137,7 @@ static class Soon
     }
 }
 
-// A counter in plain C#, for Zig to call
-// Not in Traits, since async methods can't be in unsafe code
+// A counter in plain C#, for Zig to call. Not in Traits, since async methods can't be in unsafe code.
 sealed class PlainCounter : ICounter
 {
     uint total = 100;

@@ -151,8 +151,7 @@ pub fn build(b: *std.Build) void {
     ctx.addTests("agree", agree);
 }
 
-/// Zig's own test runner, without its signal stack per thread. It's a thread-local, which on Linux
-/// goes on every thread's stack, and .NET's 256KB threads have no room for it. See `salamander_clr`.
+/// Zig's test runner without its per-thread signal stack, which .NET's 256KB threads can't fit on Linux.
 fn noSignalStackRunner(b: *std.Build) std.Build.Step.Compile.TestRunner {
     const files = b.addWriteFiles();
     _ = files.addCopyFile(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"), "zig_test_runner.zig");
@@ -172,9 +171,8 @@ fn noSignalStackRunner(b: *std.Build) std.Build.Step.Compile.TestRunner {
     return .{ .path = root, .mode = .server };
 }
 
-/// The C# the clr tests call, built with the dotnet SDK along with the C# for their schema in
-/// `schema`. Its paths are empty without the SDK, and the tests are skipped. Only looked for when
-/// salamander's the root build, since looking means configuring again every build.
+/// The C# the clr tests call, built with the dotnet SDK. Without it the paths are empty and the tests skip.
+/// Only looked for in a root build, since looking reconfigures every build.
 fn clrProbe(b: *std.Build, schema: std.Build.LazyPath) *std.Build.Module {
     const options = b.addOptions();
     const dotnet = (if (b.isRoot()) b.findProgram(.{ .names = &.{"dotnet"} }) else null) orelse {
@@ -214,9 +212,8 @@ pub const CsOptions = struct {
     class: []const u8 = "Schema",
 };
 
-/// A folder with `Salamander.cs`, `SalamanderCore.cs` made from `core.sal`, and C# for `source`, to
-/// compile into a C# project, like `<Compile Include="$(SalamanderDir)/*.cs" />`. The project needs
-/// `AllowUnsafeBlocks` and .NET 8 or newer.
+/// A folder with `Salamander.cs`, `SalamanderCore.cs` and C# for `source`, to compile into a C# project.
+/// The project needs `AllowUnsafeBlocks` and .NET 8 or newer.
 pub fn csFiles(dep: *std.Build.Dependency, options: CsOptions) std.Build.LazyPath {
     return csFilesWith(dep.builder, dep.artifact("salamander-gen"), options);
 }
@@ -264,8 +261,7 @@ pub const CHeaderOptions = struct {
     file_namespaces: []const []const u8 = &.{},
     /// Other folders' `.sal` files, named `name/...`, like a dependency's.
     with: []const ZigOptions.With = &.{},
-    /// What files starting with `prefix` declare comes from header `include`, made from them the
-    /// same way, which this one includes instead of writing them again.
+    /// What files starting with `prefix` declare comes from header `include` instead of being written again.
     aliases: []const Alias = &.{},
 
     pub const Alias = struct { prefix: []const u8, include: []const u8 };
@@ -338,7 +334,6 @@ pub const ZigOptions = struct {
     /// Tags that make a struct a global, like `wraith.Instance=Sig`. See the parser's `InstanceTag`.
     instances: []const []const u8 = &.{},
     /// What files starting with `prefix` declare comes from `module` instead, imported as `name`.
-    /// Like a `with` folder whose Zig another module already has.
     aliases: []const Alias = &.{},
 
     pub const With = struct { name: []const u8, folder: std.Build.LazyPath };
@@ -356,10 +351,8 @@ pub fn bundle(dep: *std.Build.Dependency, folder: std.Build.LazyPath) std.Build.
     return out;
 }
 
-/// A directory argument doesn't rerun when its contents change, so each `.sal` goes in as an input too.
-/// The build script lists the folder, so it reruns when a file's added or removed. Folders in a source
-/// tree, the build's own or a dependency's, or anywhere else by its path, like a plugin's dependency
-/// found next to it.
+/// Each `.sal` is an input too, since a directory argument doesn't rerun when its contents change.
+/// The build script lists the folder, so it reruns when a file's added or removed.
 fn trackSal(run: *std.Build.Step.Run, folder: std.Build.LazyPath) void {
     if (folder == .cwd_relative) return trackSalAt(run, folder.cwd_relative);
     const owner, const sub_path = switch (folder) {

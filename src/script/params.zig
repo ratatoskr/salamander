@@ -2,8 +2,7 @@
 
 const std = @import("std");
 
-/// Over `source`, a function's text like `(a, b) => a`, `function f(a) {}` or `x => x`. Each is a
-/// name, or "" for one that isn't a plain name like `{ a, b }`. A default or `...` is dropped.
+/// Over `source`, a function's text like `(a, b) => a`. Each is a name, or "" for a destructured one. Defaults and `...` are dropped.
 pub fn params(source: []const u8) Iterator {
     var s = std.mem.trimStart(u8, source, " \t\r\n");
     if (std.mem.startsWith(u8, s, "async")) s = std.mem.trimStart(u8, s["async".len..], " \t\r\n");

@@ -150,8 +150,7 @@ fn formatted(arena: std.mem.Allocator, source: []const u8) ![]const u8 {
     return tree.renderAlloc(arena);
 }
 
-/// A file's text, or a folder's `.sal` files bundled, by path so it's the same every time. `extra`
-/// goes first, like `--with` folders.
+/// A file's text, or a folder's `.sal` files bundled by path. `extra` goes first, like `--with` folders.
 fn read(arena: std.mem.Allocator, io: std.Io, path: []const u8, extra: *std.ArrayList(salamander_schema.File)) !struct { []const u8, bool } {
     const cwd = std.Io.Dir.cwd();
     const start = extra.items.len;

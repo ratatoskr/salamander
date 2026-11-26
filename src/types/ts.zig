@@ -25,13 +25,8 @@ const Use = enum {
     field,
 };
 
-/// Everything in `s` as global declarations, for a file without imports, or as what `module` exports,
-/// like `import { Wraith } from "wraith"`. Types go in namespaces,
-/// like `World.Counter`, and each namespace at the top is also a value with what's in it while
-/// scripts run: struct classes, enum values, functions, statics, roots' accessors like
-/// `Wraith.tweaks()`, and `instance()` on the traits those give and on the roots. `singletons` are
-/// whole trait names the host gives one of on their own, like `Freecam.Camera`, which scripts get
-/// from `Freecam.camera()` and `Freecam.Camera.instance()`.
+/// Everything in `s` as global declarations, or as what `module` exports, like `import { Wraith } from "wraith"`.
+/// Each top namespace is also a value while scripts run. `singletons` are whole trait names the host gives one of, like `Freecam.Camera`.
 pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8, module: ?[]const u8) Error!void {
     types.singletons = singletons;
     defer types.singletons = &.{};
@@ -93,8 +88,7 @@ fn typeNamespace(w: *Writer, s: Schema, source: []const u8, live: *const types.L
     try w.print("{s}}}\n", .{indent});
 }
 
-/// The value at `path` while scripts run, as an object type: what a struct's class, an enum or a
-/// trait has itself, then what's in its namespace.
+/// The value at `path` while scripts run, as an object type: what a struct's class, enum or trait has itself, then its namespace's.
 fn object(w: *Writer, s: Schema, source: []const u8, path: []const u8, depth: usize) Error!void {
     const indent = indentOf(depth + 1);
     try w.writeAll("{\n");
@@ -259,8 +253,7 @@ pub fn builtins(w: *Writer) Error!void {
 
 // Declarations
 
-/// A type, by its name in its namespace. Structs in memory have live views for fields, and the
-/// rest are plain values whose fields go both ways.
+/// A type by its name in its namespace. Structs in memory have live view fields, other values' fields go both ways.
 fn declareType(w: *Writer, s: Schema, source: []const u8, live: *const types.Live, e: Entry, depth: usize) Error!void {
     const indent = indentOf(depth);
     const inner = indentOf(depth + 1);

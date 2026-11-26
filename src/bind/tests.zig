@@ -1,5 +1,4 @@
-//! bind against comptime Zig, where LLVM decides the ABI: Zig's tables called through bind,
-//! and bind's tables called from Zig, with every way an argument can cross.
+//! bind against comptime Zig, both ways, with every way an argument can cross.
 
 const std = @import("std");
 const testing = std.testing;

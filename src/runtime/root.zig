@@ -1,6 +1,5 @@
 //! What generated Zig runs on. A trait is a `Desc` type whose `salamander` namespace has `name`, `hash` and `methods`.
-//! Calls pass real arguments. Only strings, slices and value optionals change shape, nothing is copied.
-//! State like owners, kept memory, promises and the registry is the `Host`'s, so plugins in other binaries share it.
+//! Shared state like owners, promises and the registry is the `Host`'s, so plugins in other binaries share it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -24,8 +23,7 @@ pub const declared = @import("declared.zig");
 
 pub const Conv = enum { c, cdecl, stdcall, thiscall, fastcall, winapi };
 
-/// x86's conventions are all the same elsewhere. `winapi` is the Windows ABI wherever there is one,
-/// stdcall on x86, Microsoft's on x64 anywhere, and plain C on aarch64 off Windows.
+/// `winapi` is stdcall on x86, Microsoft's on x64, and plain C on aarch64 off Windows.
 pub fn callingConvention(comptime conv: Conv) std.lang.CallingConvention {
     if (conv == .winapi) return switch (builtin.cpu.arch) {
         .x86, .x86_64 => std.lang.CallingConvention.winapi,
@@ -188,10 +186,8 @@ pub const AnyObject = extern struct {
     }
 };
 
-/// Fields through pointers, like `follow(manager, "items.table.data")`, the way generated structs
-/// point at each other. Null at the first null pointer on the way, or one that can't be read, since
-/// each is read through `declared.read`. `start` is a pointer, or an optional one. A struct held by
-/// value along the way gives a pointer to it.
+/// Follows fields through pointers, like `follow(manager, "items.table.data")`, each read through `declared.read`.
+/// Null at a null or unreadable pointer. A struct held by value on the way gives a pointer to it.
 pub fn follow(start: anytype, comptime path: []const u8) ?Followed(Start(@TypeOf(start)), path) {
     const from: Start(@TypeOf(start)) = if (@typeInfo(@TypeOf(start)) == .optional) start orelse return null else start;
     return followFrom(from, path);
@@ -329,8 +325,7 @@ pub const blobs = @import("blob.zig");
 pub const Blob = blobs.Blob;
 pub const Awaited = promise.Awaited;
 
-/// A pointer comptime types use where a real one would make a type contain itself.
-/// `Get.Type` is looked up only when used.
+/// A pointer comptime types use where a real one would make a type contain itself. `Get.Type` is looked up lazily.
 pub fn Ptr(comptime Get: type) type {
     return extern struct {
         const Self = @This();
@@ -413,8 +408,7 @@ pub fn Args(comptime Desc: type, comptime name: []const u8) type {
     return std.meta.ArgsTuple(method(Desc, name).Fn);
 }
 
-/// What a generated file's method `name` returns, with its plain types. An implementation can
-/// return this. For a trait without methods of its own it's `Return`.
+/// What a generated method `name` returns, in plain types. `Return` for a trait without methods of its own.
 pub fn Plain(comptime Desc: type, comptime name: []const u8) type {
     if (@hasDecl(Desc, name)) return @typeInfo(@TypeOf(@field(Desc, name))).@"fn".return_type.?;
     return Return(Desc, name);
@@ -463,8 +457,7 @@ pub fn headerOf(table: *const anyopaque) *const Header {
     return @ptrCast(@alignCast(table));
 }
 
-/// `salamander_info` and `salamander_owner`, then a pointer per method in order, null for a missing one.
-/// Callers enter the owner, if there is one, before calling through it.
+/// `salamander_info`, `salamander_owner`, then a pointer per method, null if missing. Enter the owner before calling through it.
 pub fn Table(comptime Desc: type) type {
     @setEvalBranchQuota(100_000);
     const ms = Desc.salamander.methods;
@@ -504,8 +497,7 @@ const callMethod = invoke;
 pub fn invoke(comptime Desc: type, comptime name: []const u8, obj: anytype, args: Args(Desc, name)) Return(Desc, name) {
     const m = comptime method(Desc, name);
     var table: *const Table(Desc) = @ptrCast(@alignCast(obj.table orelse return gone(Return(Desc, name))));
-    // Made for another version of the trait, like an object from a newer host. Its methods match by
-    // name, since their order isn't ours
+    // From another version of the trait, so methods match by name, since their order isn't ours
     if (table.salamander_info.hash != Desc.salamander.hash) {
         const fitted = host().adapt(Desc, obj);
         table = @ptrCast(@alignCast(fitted.table orelse return missing(Return(Desc, name))));
@@ -630,9 +622,8 @@ pub fn mapped(comptime Desc: type, comptime items: []const Mapped) *Table(Desc) 
     }.table;
 }
 
-/// A table whose methods each call the C function `Calls.function(name)` gives at comptime, arguments as
-/// they are. A method with `this` passes the object's data first, like C's `self`. If `Calls.allowed()`
-/// refuses, the method gives its zero. For a C API like Dear ImGui's.
+/// A table whose methods call the C function `Calls.function(name)`, `this` as data first, for C APIs like Dear ImGui.
+/// A method `Calls.allowed()` refuses gives its zero.
 pub fn forwarding(comptime Desc: type, comptime Calls: type) *const Table(Desc) {
     return &struct {
         const table: Table(Desc) = blk: {
@@ -659,8 +650,7 @@ fn forwardEntry(comptime m: Method, comptime Calls: type) *const Entry(m) {
     }.body);
 }
 
-/// `v`, a generated file's plain Zig value, as the wire type `W`. Strings and slices go as `Slice`,
-/// plain structs as their `raw` ones. Slices whose items change go in `a`.
+/// `v`, a plain Zig value, as wire type `W`. Changed slices go in `a`.
 pub fn toWire(comptime W: type, a: std.mem.Allocator, v: anytype) error{OutOfMemory}!W {
     const V = @TypeOf(v);
     if (V == W) return v;
@@ -696,8 +686,7 @@ pub fn toWire(comptime W: type, a: std.mem.Allocator, v: anytype) error{OutOfMem
     }
 }
 
-/// The other way: `w`, a wire value, as the plain type `P`. Text points where `w`'s did. Slices whose
-/// items change go in `a`.
+/// `w`, a wire value, as plain type `P`. Text points where `w`'s did, changed slices go in `a`.
 pub fn fromWire(comptime P: type, a: std.mem.Allocator, w: anytype) error{OutOfMemory}!P {
     const Wt = @TypeOf(w);
     if (Wt == P) return w;
@@ -738,8 +727,7 @@ fn giving() std.mem.Allocator {
     return given.?.allocator();
 }
 
-/// Where plain values a call gave back keep their converted slices, good till this thread's next
-/// call that needs it.
+/// Where a call's converted plain results live, good till this thread's next call that needs it.
 pub fn lifting() std.mem.Allocator {
     if (lifted) |*l| {
         _ = l.reset(.retain_capacity);
@@ -780,8 +768,7 @@ pub fn setEntry(comptime m: Method, comptime offset: usize) *const Entry(m) {
     }.body);
 }
 
-/// A C entry that converts and calls `function`, whose parameters and result can be a generated
-/// file's plain types. What's converted for its result lasts till this thread's next conversion.
+/// A C entry that converts and calls `function`. Converted results last till this thread's next conversion.
 pub fn entryFor(comptime m: Method, comptime function: anytype) *const Entry(m) {
     const s = shape(m);
     const want = @typeInfo(m.Fn).@"fn";

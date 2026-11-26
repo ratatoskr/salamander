@@ -1,5 +1,4 @@
-//! Memory laid out like `rt.Abi` to JS values and back, going by the schema.
-//! Ints up to 32 bits, usize and pointers are numbers, i64 and u64 are BigInts.
+//! Memory laid out like `rt.Abi` to JS values and back. Ints up to 32 bits, usize and pointers are numbers, i64 and u64 BigInts.
 //! `u8[N]` and `u16[N]` text are strings, enums take a number or a name.
 
 const std = @import("std");

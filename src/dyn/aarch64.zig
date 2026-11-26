@@ -1,7 +1,5 @@
-//! aarch64 `dyn`, Windows, Linux and macOS. Ints go in X0 to X7 and floats in D0 to D7, counted apart, and a
-//! big result's hidden pointer in X8. The rest go on the stack, 8 bytes each, but Apple packs them to their own
-//! size and alignment. A struct that didn't fit in registers closes its kind's registers to later args.
-//! Results come back in X0 and X1 for ints and D0 to D3 for floats.
+//! aarch64 `dyn`, Windows, Linux and macOS. Ints in X0-X7, floats in D0-D7, a big result's pointer in X8, the rest on the stack.
+//! Apple packs stack args to their own size. A struct that didn't fit closes its kind's registers to later args.
 
 const std = @import("std");
 const dyn = @import("root.zig");
@@ -183,8 +181,7 @@ pub fn setReturns(frame: *Frame, sig: dyn.Signature, bits: *const [dyn.max_resul
 
 pub fn Detour(comptime handler: *const fn (frame: *Frame) callconv(.c) void) type {
     return struct {
-        // Not `noreturn`, it returns to its caller, and an optimizer
-        // mustn't drop what comes after a call to it
+        // Not `noreturn`: it returns, so code after a call to it mustn't be dropped
         pub fn entry() callconv(.naked) void {
             asm volatile (
                 \\stp x29, x30, [sp, #-208]!

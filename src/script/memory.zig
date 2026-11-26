@@ -125,8 +125,7 @@ pub fn releaseBlobs(s: Schema, r: Ref, mem: [*]const u8) void {
     }
 }
 
-/// Union members overlap, so each is tried on what was there and only one that changes it goes in,
-/// the last if more do. Structs are written straight through.
+/// Union members overlap, so only one that changes what's there is written, the last if several. Structs are written straight through.
 pub const UnionWrite = struct {
     was: []const u8 = &.{},
     tmp: []u8 = &.{},

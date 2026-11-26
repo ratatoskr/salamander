@@ -1,7 +1,4 @@
-//! LuaLS annotations. `globals` declares what schemas give scripts, with each namespace at the top a
-//! global, and `builtins` declares `salamander`. Types are classes by their whole names, like
-//! `World.Counter`. What a namespace holds while scripts run is a class too, like `World`, or
-//! `World.CounterClass` for a struct's class, an enum's values or a trait's `instance()`.
+//! LuaLS annotations. `globals` declares what schemas give scripts, each top namespace a global, and `builtins` declares `salamander`.
 
 const std = @import("std");
 const Schema = @import("salamander_schema").Schema;
@@ -17,12 +14,8 @@ const header = "-- Made from .sal files by Salamander. Don't change it, since it
 
 const Use = enum { out, in, view, field };
 
-/// Everything in `s`, for a `---@meta` file. Each namespace at the top is a global table, like
-/// `World`, with struct classes, enum values, functions, statics, roots' accessors like
-/// `Wraith.tweaks()`, and `instance()` on the traits those give and on the roots. `singletons` are
-/// whole trait names the host gives one of on their own, like `Freecam.Camera`, which scripts get
-/// from `Freecam.camera()` and `Freecam.Camera.instance()`. With `module`, they're on what
-/// `require(module)` gives instead of globals.
+/// Everything in `s`, for a `---@meta` file, each top namespace a global table, or on what `require(module)` gives with `module`.
+/// `singletons` are whole trait names the host gives one of, like `Freecam.Camera`, got from `Freecam.camera()`.
 pub fn globals(w: *Writer, s: Schema, source: []const u8, singletons: []const []const u8, module: ?[]const u8) Error!void {
     types.singletons = singletons;
     defer types.singletons = &.{};
@@ -99,15 +92,13 @@ fn namespaceTables(w: *Writer, s: Schema, source: []const u8, path: []const u8) 
     }
 }
 
-/// The class of what's at `path` while scripts run, like `World.CounterClass`, or `World` for a
-/// namespace that's only one.
+/// The class at `path` while scripts run, like `World.CounterClass`, or `World` for a plain namespace.
 fn tableName(w: *Writer, s: Schema, path: []const u8) Error!void {
     try types.writeTypeName(w, path);
     if (s.findType(path) != null or s.findTrait(path) != null) try w.writeAll("Class");
 }
 
-/// The table at `path`: what a struct's class, an enum or a trait has itself, then what's in its
-/// namespace.
+/// The table at `path`: what a struct's class, enum or trait has itself, then what's in its namespace.
 fn table(w: *Writer, s: Schema, source: []const u8, path: []const u8) Error!void {
     const h = types.holder(s, path);
     try w.writeAll("do\n---@class ");
@@ -282,8 +273,7 @@ pub fn builtins(w: *Writer) Error!void {
 
 // Declarations
 
-/// A type, by its whole name. Structs in memory have live views for fields, and the rest are plain
-/// values whose fields go both ways.
+/// A type by its whole name. Structs in memory have live view fields, other values' fields go both ways.
 fn declareType(w: *Writer, s: Schema, source: []const u8, live: *const types.Live, e: Entry) Error!void {
     const t = switch (e.what) {
         .trait => |t| return trait(w, s, source, t),

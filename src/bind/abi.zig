@@ -1,12 +1,5 @@
-//! How a schema method's arguments cross the C ABI, worked out at runtime, for traits only known from a parsed
-//! schema. Memory is laid out like `rt.Abi`, and this says how it travels, in registers, by reference or over stack words.
-//!
-//! Windows x64 passes 1, 2, 4 and 8 byte aggregates in a register, others by reference, and returns bigger
-//! ones through a hidden pointer. SysV x64 splits ones up to 16 bytes into eightbytes, int or float by what's
-//! in them, and passes bigger ones or ones that don't fit on the stack. It returns them the same way or through
-//! a hidden pointer. x86 passes them on the stack. Windows returns 1, 2, 4 and 8 byte ones in EAX:EDX, Linux
-//! returns all of them through a hidden pointer. aarch64 passes up to four floats of one type in float registers,
-//! others up to 16 bytes in int registers and bigger ones by reference. It returns them the same way or through X8.
+//! How a schema method's arguments cross the C ABI, worked out at runtime from a parsed schema.
+//! Memory is laid out like `rt.Abi`; this says whether it travels in registers, by reference or in stack words.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -112,8 +105,7 @@ pub const Pass = union(enum) {
     direct: Direct,
     /// A pointer to a copy of it. x64's way for big aggregates.
     by_ref: u8,
-    /// Its bytes split over parameters, `size` each: stack words on x86 and for what didn't fit in
-    /// registers, SysV x64's eightbytes, or aarch64's floats one per register.
+    /// Its bytes split over parameters, `size` each: x86 stack words, SysV x64 eightbytes or aarch64 floats.
     words: Words,
 
     pub const Direct = struct {
@@ -297,8 +289,7 @@ fn leavesOf(s: Schema, r: Ref, base: usize, out: *Leaves, depth: usize) void {
     }
 }
 
-/// How an aggregate goes in registers, each part's type, `size` bytes each. Null if it doesn't,
-/// like one bigger than 16 bytes on SysV x64.
+/// How an aggregate goes in registers, `size` bytes per part. Null if it doesn't, like over 16 bytes on SysV x64.
 const Split = struct {
     types: [4]dyn.Type = undefined,
     count: u8 = 0,
@@ -433,8 +424,7 @@ pub fn lower(s: Schema, sig: Schema.Signature, static: bool, is_async: bool) Err
     }
 
     var used: Used = .{};
-    // The hidden pointer always goes first, as LLVM and clang do for plain functions. So on x86 it takes ECX
-    // from a thiscall's `this`, unlike C++ member functions under MSVC. On aarch64 it's in X8 instead.
+    // The hidden pointer goes first, like clang. On x86 it takes ECX from a thiscall's `this`, unlike MSVC; on aarch64 it's X8.
     if (hidden) {
         l.ret = .{ .hidden = try l.add(.sret) };
         l.ret_type = dyn.Type.ptr;

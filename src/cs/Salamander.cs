@@ -1,10 +1,6 @@
-// Salamander's ABI for C#. Generated files use this. Plain blittable types, function pointers and
-// [UnmanagedCallersOnly] only, so it's the same JIT'd under CoreCLR or compiled with NativeAOT.
-//
-// A trait object is { data, table }. A table starts with a Header, then a function pointer per method.
-// A null one is a method the table doesn't have, so the call gives zero, or Abi.Unsupported for a
-// result. Before calling through a table with an owner, enter the owner, and leave after. A closed
-// owner refuses, and the call gives zero, or Abi.Gone for a result. The generated helpers do all this.
+// Salamander's ABI for C#, used by generated files. Blittable types and function pointers only, so it works under CoreCLR and NativeAOT.
+// A trait object is { data, table }. A table is a Header, then a function pointer per method, null if missing.
+// Callers enter a table's owner around each call. A missing method or closed owner gives zero, or Unsupported or Gone for a result.
 
 #nullable enable
 
@@ -47,10 +43,7 @@ public static unsafe class Abi
         if (owner != null) Interlocked.Decrement(ref *(int*)&owner->calls);
     }
 
-    /// <summary>
-    /// Gets what C# implementing a trait threw, since it can't cross into native code. The call
-    /// gives zero, or Abi.Gone for a result.
-    /// </summary>
+    /// <summary>Gets what C# implementing a trait threw, since it can't cross. The call gives zero, or Abi.Gone for a result.</summary>
     public static Action<Exception>? OnException;
 
     public static void Threw(Exception e) => OnException?.Invoke(e);
@@ -61,10 +54,7 @@ public static unsafe class Abi
         if (sizeof(nint) != size) throw new PlatformNotSupportedException($"these types are for {size * 8}-bit code");
     }
 
-    /// <summary>
-    /// A trait's Info, kept for good. methods is each method's name, each ending in a zero, with
-    /// sigs in the same order. pointerSize is what the generated file was made for.
-    /// </summary>
+    /// <summary>A trait's Info, kept for good. methods is zero-terminated names, sigs in the same order.</summary>
     public static Info* MakeInfo(int pointerSize, ulong hash, ReadOnlySpan<byte> name, ReadOnlySpan<byte> methods, ReadOnlySpan<ulong> sigs)
     {
         ExpectPointerSize(pointerSize);
@@ -130,10 +120,7 @@ public unsafe struct Str
 
     public override string ToString() => len == 0 ? "" : Encoding.UTF8.GetString(ptr, checked((int)len));
 
-    /// <summary>
-    /// A u8 literal's bytes, like Str.Literal("hello"u8). They're in the program's own data, so
-    /// they stay put. Any other span has to be pinned for as long as the Str's used.
-    /// </summary>
+    /// <summary>A u8 literal's bytes, like Str.Literal("hello"u8). Any other span must stay pinned while the Str's used.</summary>
     public static Str Literal(ReadOnlySpan<byte> utf8)
     {
         fixed (byte* p = utf8) return new(p, (nuint)utf8.Length);
@@ -367,10 +354,7 @@ public static unsafe class Runtime
 
     public static Raw.Host Host => host.table != null ? host : throw new InvalidOperationException("Salamander.Runtime.Init hasn't been called with the host");
 
-    /// <summary>
-    /// What a plugin does first, with the host it got. Objects made with From after this have an
-    /// owner, so ones passed to keep parameters are let go of when the host's done with them.
-    /// </summary>
+    /// <summary>What a plugin does first, with its host. Objects From makes after this have an owner, so keep parameters get let go.</summary>
     public static void Init(Raw.Host host, string name = "csharp")
     {
         Runtime.host = host;
@@ -426,11 +410,7 @@ public interface ITrait<T> where T : class, ITrait<T>
     static abstract T? FromObject(AnyObject o, bool owned = false);
 }
 
-/// <summary>
-/// The single objects of traits the host gives a plugin, like another plugin's service, by full trait
-/// name. Whatever loads the plugin sets them, and the generated Instance of each trait in a schema's
-/// singletons reads its own.
-/// </summary>
+/// <summary>Single objects of traits the host gives a plugin, by full trait name. Set by the loader, read by generated Instance.</summary>
 public static class Singletons
 {
     static readonly System.Collections.Concurrent.ConcurrentDictionary<string, AnyObject> objects = new();
@@ -446,11 +426,7 @@ public static class Singletons
         throw new InvalidOperationException($"There's no {T.TraitName} here. Does the plugin depend on the one that offers it?");
     }
 }
-/// <summary>
-/// Finds code a schema declares in what already exists, like a game's functions by signature, for the
-/// generated wrappers. Whatever loads this sets Locator, which gives an address or throws saying why.
-/// What it finds is kept.
-/// </summary>
+/// <summary>Finds code a schema declares, like a game's functions. The loader sets Locator, which gives an address or throws. Kept once found.</summary>
 public static class Declared
 {
     public static Func<string, nuint>? Locator;
@@ -472,21 +448,14 @@ public static class Declared
     public static unsafe nuint Virtual(void* obj, int slot) => (*(nuint**)obj)[slot];
 }
 
-/// <summary>
-/// What a hooked handler's first argument reads: the function as it was and the hook's context. The
-/// host fills it once the hook's made, before anything calls the handler.
-/// </summary>
+/// <summary>A hooked handler's first argument: the original function and the hook's context. Filled before the handler runs.</summary>
 public sealed class HookCell
 {
     public nuint Original;
     public nuint Context;
 }
 
-/// <summary>
-/// A function a schema declares, like a game's, as a value: its name, and handlers of its type. Each
-/// generated one is under its owner's Fns, like Player.Fns.Heal. Handler takes its arguments, and
-/// Hooked the hook's details first.
-/// </summary>
+/// <summary>A declared function as a value, like Player.Fns.Heal: its name and handlers of its type.</summary>
 public abstract class DeclaredFunction<Handler, Hooked>(string name) where Handler : Delegate where Hooked : Delegate
 {
     /// <summary>Its full name, like Game.Player.heal.</summary>
@@ -535,8 +504,7 @@ public static unsafe class Promises
 
         public void call()
         {
-            // Settled first and tidied, then carried on, since carrying on runs the awaiting code
-            // right here, on the thread that settled it
+            // Settled and tidied first, since carrying on runs the awaiting code right here, on the settling thread
             Exception? failed = null;
             P? value = default;
             try
@@ -562,10 +530,7 @@ public static unsafe class Promises
         }
     }
 
-    /// <summary>
-    /// A task for p's value, lifted to C# with lift. Cancelling cancel cancels p. Awaiting it carries
-    /// on on the thread that settled p, so the host decides where code goes after an await.
-    /// </summary>
+    /// <summary>A task for p's value, lifted with lift. Cancelling cancel cancels p. Awaiting carries on on the thread that settled p.</summary>
     public static Task<P> Await<W, P>(Raw.Promise p, CancellationToken cancel, Func<uint, Exception> fail, Func<W, P> lift) where W : unmanaged
     {
         var done = new TaskCompletionSource<P>();

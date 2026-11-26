@@ -42,11 +42,9 @@ pub const Type = enum {
     i64,
     f32,
     f64,
-    /// A pointer-sized piece of something bigger that goes on the stack, like a struct passed by value
-    /// on x86 or one that didn't fit in registers. Never goes in a register.
+    /// A pointer-sized piece of something on the stack, like an x86 by-value struct. Never in a register.
     word,
-    /// Like `word`, for a float-only struct on aarch64 that didn't fit in float registers. Then no more
-    /// float args go in registers either.
+    /// Like `word`, for an aarch64 float struct that didn't fit in float registers, which closes them to later floats.
     float_word,
     /// The hidden pointer to where a big result goes. X8 on aarch64, else the next int register.
     sret,
@@ -92,8 +90,7 @@ pub const Conv = enum {
 pub const Signature = struct {
     params: []const Type = &.{},
     ret: Type = .void,
-    /// Results that come back in more than one register, after `ret`: RDX or XMM1 on SysV x64, and X1
-    /// or V1 to V3 on aarch64. Each register takes the next of its kind.
+    /// Extra result registers after `ret`: RDX or XMM1 on SysV x64, X1 or V1 to V3 on aarch64.
     ret_more: []const Type = &.{},
     conv: Conv = .cdecl,
 

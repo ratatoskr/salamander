@@ -24,9 +24,8 @@ pub const signature_name = Schema.signature_name;
 
 pub const SignatureError = parser.Error || error{NotASignature};
 
-/// A function type written on its own, like `[Thiscall] fn i32 (Actor* self, f32 amount)`, with
-/// `base`'s types in scope. It's parsed as `signature_name` and problems say they're in `signature`.
-/// Can also name a function `base` declares, like `spawn` or `Player.heal`, whose methods take `this` first.
+/// A function type on its own, like `[Thiscall] fn i32 (Actor* self, f32 amount)`, with `base`'s types in scope.
+/// It can also name a function `base` declares, like `Player.heal`, whose methods take `this` first.
 pub fn parseSignature(gpa: @import("std").mem.Allocator, base: []const u8, text: []const u8, options: Options, diagnostic: ?*Diagnostic) SignatureError!Parsed {
     const std = @import("std");
     const keyword = findFn(text) orelse return declared(gpa, base, std.mem.trim(u8, text, " \t\r\n;"), options, diagnostic);
@@ -81,8 +80,7 @@ pub const File = struct {
 
 pub const BundleError = error{ OutOfMemory, InvalidFileName };
 
-/// Many files as one schema's text. Each sees every other's types and traits but keeps its own `use`s,
-/// and problems say which file they're in. Caller frees it.
+/// Many files as one schema's text. Each sees the others' types but keeps its own `use`s. Caller frees it.
 pub fn bundle(gpa: @import("std").mem.Allocator, files: []const File) BundleError![]u8 {
     var out: @import("std").ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);

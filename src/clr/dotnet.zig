@@ -5,8 +5,7 @@ const builtin = @import("builtin");
 const sys = @import("salamander_sys");
 const fxr = @import("fxr.zig");
 
-/// Where .NET's installed. `DOTNET_ROOT_<ARCH>` or `DOTNET_ROOT` if set, then where its installer
-/// says it put it, in the registry or `/etc/dotnet`, then the usual place. Free with `a`.
+/// Where .NET's installed: `DOTNET_ROOT_<ARCH>` or `DOTNET_ROOT`, the installer's record, then the usual place. Free with `a`.
 pub fn root(a: std.mem.Allocator, io: std.Io) error{OutOfMemory}!?[]u8 {
     const arch: ?[]const u8 = switch (builtin.cpu.arch) {
         .x86_64 => "x64",
@@ -42,8 +41,7 @@ pub fn root(a: std.mem.Allocator, io: std.Io) error{OutOfMemory}!?[]u8 {
     return null;
 }
 
-/// Where the installer recorded it went. The 32-bit registry view on Windows, whatever this
-/// process is, and `/etc/dotnet/install_location_<arch>` or `install_location` elsewhere.
+/// Where the installer recorded it: the 32-bit registry view on Windows, else `/etc/dotnet/install_location[_<arch>]`.
 fn installed(a: std.mem.Allocator, io: std.Io, arch: []const u8) error{OutOfMemory}!?[]u8 {
     var buf: [64]u8 = undefined;
     if (builtin.os.tag == .windows) {

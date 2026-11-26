@@ -7,8 +7,7 @@ pub fn check(sig: dyn.Signature) dyn.Error!void {
     if (sig.ret_more.len > 0) return error.Unsupported;
 }
 
-/// Whether a hidden result pointer takes ECX. LLVM only does that for thiscall on windows-gnu. On
-/// MSVC and Linux it goes on the stack and `this` keeps ECX, and fastcall always keeps it on the stack.
+/// Whether a hidden result pointer takes ECX, which LLVM only does for thiscall on windows-gnu.
 pub fn sretInRegister(conv: dyn.Conv) bool {
     return conv == .thiscall and builtin.os.tag == .windows and builtin.abi != .msvc;
 }
@@ -178,12 +177,10 @@ pub fn setReturns(frame: *Frame, sig: dyn.Signature, all: *const [dyn.max_result
     };
 }
 
-/// Returns popping `pop` bytes, moving the return address up over the args. The handler gets a 16 byte
-/// aligned stack, which Linux needs.
+/// Returns popping `pop` bytes. The handler gets the 16 byte aligned stack Linux needs.
 pub fn Detour(comptime handler: *const fn (frame: *Frame) callconv(.c) void) type {
     return struct {
-        // Not `noreturn`, it returns to its caller, and an optimizer
-        // mustn't drop what comes after a call to it
+        // Not `noreturn`: it returns, so code after a call to it mustn't be dropped
         pub fn entry() callconv(.naked) void {
             asm volatile (
                 \\.intel_syntax noprefix

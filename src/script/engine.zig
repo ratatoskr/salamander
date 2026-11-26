@@ -124,18 +124,14 @@ pub const Script = struct {
         return self.vtable.module(self.ptr, name, exports);
     }
 
-    /// A module `name` scripts import, like `import { Wraith, Kai } from "wraith"` or
-    /// `require("wraith")`, with each namespace at the top of the loaded schemas and what's in it.
-    /// Each of `roots` is a `[Root]` trait's object: its accessors are functions on its namespace,
-    /// like `Wraith.tweaks()`, and the traits they give get `instance()`. With `globals` they're
-    /// globals too, which fails with none set if one would hide the language's own, like `Math`.
+    /// A module `name` scripts import, like `import { Wraith } from "wraith"`, with each top namespace of the loaded schemas.
+    /// `roots`' accessors go on their namespaces. With `globals` they're globals too, failing if one would hide a built-in.
     pub fn namespaces(self: Script, name: []const u8, roots: []const Export, globals: bool) Error!void {
         return self.vtable.namespaces(self.ptr, name, roots, globals);
     }
 
-    /// Methods written in the script's language for every `trait` object, like extension methods.
-    /// `source` gives an object of functions in JS, like `({ twice() { ... } })`, or returns a table
-    /// of them in Lua. Each gets the object as `this` or `self`. They can't replace the trait's own.
+    /// Script-written methods for every `trait` object, like extension methods. They get it as `this` or `self` and can't replace its own.
+    /// `source` gives an object of functions in JS, or returns a table of them in Lua.
     pub fn extend(self: Script, types: *const Module, trait: []const u8, source: []const u8) Error!void {
         return self.vtable.extend(self.ptr, types, trait, source);
     }
@@ -150,8 +146,7 @@ pub const Script = struct {
         return self.vtable.eval(self.ptr, source, buf);
     }
 
-    /// What the main script exports as `name`, as a `trait` object. JS reads the main module's
-    /// exports, Lua the table main returns. Kept in the current scope. `release` it when done.
+    /// What the main script exports as `name`, as a `trait` object. Kept in the current scope, `release` it when done.
     pub fn take(self: Script, name: []const u8, s: *const Module, trait: []const u8) Error!rt.AnyObject {
         return self.vtable.take(self.ptr, name, s, trait);
     }
@@ -161,8 +156,7 @@ pub const Script = struct {
         self.vtable.pump(self.ptr);
     }
 
-    /// Like `pump`, from `queue`, one a `Resume` posts to, on whatever thread pumps it. Without
-    /// `wait` it gives up if another thread's in, and gives false.
+    /// Like `pump`, from `queue`, on whatever thread pumps it. Without `wait` it gives false if another thread's in.
     pub fn pumpQueue(self: Script, queue: rt.Queue, wait: bool) bool {
         return self.vtable.pumpQueue(self.ptr, queue, wait);
     }

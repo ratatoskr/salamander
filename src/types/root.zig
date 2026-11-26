@@ -1,6 +1,5 @@
 //! Editor typings for `.sal` schemas, TypeScript and LuaLS, for scripts on the JS and Lua hosts.
-//! Each namespace at the top is a global, like `Script.globals` makes them. Docs come from the `//`
-//! lines above each thing in the source.
+//! Docs come from the `//` lines above each thing in the source.
 
 const std = @import("std");
 const Schema = @import("salamander_schema").Schema;
@@ -50,8 +49,7 @@ pub const DocLines = struct {
     }
 };
 
-/// A type's name as scripts write it, like `World.Counter`. Each part is one identifier, so a
-/// generic's `StdVector<Item*>` is `StdVector_ItemPtr`.
+/// A type's name as scripts write it, like `World.Counter`, each part one identifier, like `StdVector_ItemPtr`.
 pub fn writeTypeName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
     var rest = name;
     while (firstDot(rest)) |d| {
@@ -74,8 +72,7 @@ pub fn firstDot(name: []const u8) ?usize {
     return null;
 }
 
-/// Something with a name scripts know, like the struct `World.Counter` or a root's accessor, which
-/// is `Wraith.tweaks` for `Wraith.Api.tweaks`.
+/// Something with a name scripts know, like the struct `World.Counter` or `Wraith.tweaks` for `Wraith.Api.tweaks`.
 pub const Entry = struct {
     /// Its namespace, like `World`. Empty at the top.
     parent: []const u8,
@@ -89,8 +86,7 @@ pub const Entry = struct {
         static: *const Schema.Static,
         /// A `[Root]` trait's method giving one of its namespace's objects.
         accessor: *const Schema.Method,
-        /// One of `singletons`, a function by its name lowercased, see `singletonName`. Its
-        /// `leaf` is still the trait's.
+        /// One of `singletons`, as a function by its lowercased name. `leaf` is still the trait's.
         singleton: *const Schema.Trait,
     };
 
@@ -99,8 +95,7 @@ pub const Entry = struct {
         return .{ .parent = name[0..end], .leaf = name[end + 1 ..], .what = what };
     }
 
-    /// Whether it's there while scripts run, on a global or as one. Generics' instances aren't,
-    /// since their names aren't names in scripts, and statics at the top aren't globals.
+    /// Whether it's there while scripts run. Generics' instances and top-level statics aren't.
     pub fn isValue(e: Entry, s: Schema) bool {
         if (std.mem.indexOfScalar(u8, e.parent, '<') != null or std.mem.indexOfScalar(u8, e.leaf, '<') != null) return false;
         return switch (e.what) {
@@ -131,8 +126,7 @@ pub fn hasInstance(s: Schema, t: *const Schema.Trait) bool {
     return t.root or s.accessorOf(t.name) != null or isSingleton(t.name);
 }
 
-/// Traits the host gives scripts one of on their own, like a dependency's service `Freecam.Camera`.
-/// Each is a function on its namespace, like `Freecam.camera()`. Set while `globals` writes.
+/// Traits the host gives scripts one of, like `Freecam.Camera`, each a function like `Freecam.camera()`. Set while `globals` writes.
 pub threadlocal var singletons: []const []const u8 = &.{};
 
 fn isSingleton(name: []const u8) bool {
@@ -231,8 +225,7 @@ pub const Side = enum {
     }
 };
 
-/// The namespaces right in `path`, like `World.Inner` in `World`, each once, as whole names. Only
-/// those with something `side` keeps in them, however deep. At the top `path` is empty.
+/// The namespaces right in `path`, as whole names, each once, holding something `side` keeps. Empty `path` is the top.
 pub const Children = struct {
     s: Schema,
     path: []const u8,
@@ -291,8 +284,7 @@ pub fn holder(s: Schema, path: []const u8) ?Entry {
     return null;
 }
 
-/// Which structs are in memory, like a game's, whose fields are live views. The rest are plain
-/// values, like what traits take and give, so their fields go both ways.
+/// Which structs are in memory, whose fields are live views. The rest are plain values whose fields go both ways.
 pub const Live = struct {
     bits: std.StaticBitSet(max) = .empty,
 

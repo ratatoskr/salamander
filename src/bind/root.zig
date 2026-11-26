@@ -1,7 +1,5 @@
-//! Calling and implementing traits from a schema parsed at runtime, for hosts and tools with no Zig types for them.
-//! Arguments and results are pointers to memory laid out like `rt.Abi`, so a language host only reads and writes memory.
-//! Tables made here send every call to one dispatch through `dyn` detours, one per slot and place `this` can be,
-//! which find the object's record through `this`. So static methods can't be implemented and come out missing.
+//! Calling and implementing traits from a schema parsed at runtime, through memory laid out like `rt.Abi`.
+//! Tables made here find the object's record through `this`, so static methods can't be implemented.
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
@@ -13,8 +11,7 @@ pub const abi = @import("abi.zig");
 const Schema = salamander_schema.Schema;
 const plan = salamander_schema.plan;
 
-/// Most methods a table made here can have. Callers can call any number, so a big native trait like
-/// ImGui's is fine, but one a script implements is missing its methods past this.
+/// Most methods a table made here can have. Calls aren't limited, but a script's impl misses methods past this.
 pub const max_slots = 64;
 
 /// A trait's methods, worked out from its schema. In the host's memory like everything tables point at.
@@ -73,8 +70,7 @@ const Scratch = struct {
     }
 };
 
-/// A plain function's lowered type, like a game function's, for calling it or detouring calls to it.
-/// Kept in the host's memory, like everything entries point at.
+/// A plain function's lowered type, for calling or detouring it. Kept in the host's memory.
 pub const Function = struct {
     lowered: abi.Lowered,
     /// The same as a `fn` value's with this signature, so one can be checked against it.
@@ -105,8 +101,7 @@ pub const FnRecord = struct {
     dispatch: Dispatch,
 };
 
-/// One entry for calls to functions of any type, sent to whatever `find` gives each call, like the hook
-/// engine's current hook. The record says how the arguments came in.
+/// One entry for calls to functions of any type, each sent to whatever `find` gives, like a hook engine's current hook.
 pub fn Detour(comptime find: fn () *const FnRecord) type {
     return struct {
         pub fn address() usize {
@@ -128,9 +123,7 @@ pub const max_functions = 256;
 var function_records: [max_functions]FnRecord = undefined;
 var functions_made: std.atomic.Value(u32) = .init(0);
 
-/// A native function of `f`'s type whose calls all go to `dispatch` with `ctx`, as method 0, like a host
-/// giving code for a function a schema declares. It's for good, since whoever has its address can call
-/// it, so make one per function and keep it.
+/// A native function of `f`'s type whose calls all go to `dispatch` as method 0. Never freed, so make one per function.
 pub fn function(f: *const Function, ctx: usize, dispatch: Dispatch) error{TooManyFunctions}!usize {
     const n = functions_made.fetchAdd(1, .monotonic);
     if (n >= max_functions) return error.TooManyFunctions;
@@ -154,9 +147,8 @@ fn FunctionEntry(comptime n: usize) type {
     }.handler);
 }
 
-/// Calls slot `i` of `obj`, a `t`. `args[k]` points at argument k's memory and the value goes to `value`,
-/// which has room for it. Gives a result's code, or 0 for anything else. A missing method or one that
-/// can't cross gives zero, or `Unsupported` for a result, and one whose owner closed gives zero or `Gone`.
+/// Calls slot `i` of `obj`, a `t`, with `args[k]` pointing at argument k and the value written to `value`.
+/// Gives a result's code, or 0. A missing method gives zero or `Unsupported`, a closed owner zero or `Gone`.
 pub fn call(t: *const Trait, obj: rt.AnyObject, i: usize, args: []const [*]const u8, value: [*]u8) u32 {
     const l = &(t.methods[i] orelse return missing(null, rt.unsupported_code, value));
     const tab = obj.table orelse return missing(l, rt.gone_code, value);
@@ -225,20 +217,17 @@ fn missing(l: ?*const abi.Lowered, code: u32, value: [*]u8) u32 {
     return if (lowered.result) code else 0;
 }
 
-/// Gets slot `method`'s arguments as pointers to their memory, and writes the value to `value`.
-/// Returns a result's code, ignored for anything else.
+/// Gets slot `method`'s arguments as pointers and writes the value to `value`. Returns a result's code.
 pub const Dispatch = *const fn (ctx: usize, method: u32, args: []const [*]u8, value: [*]u8) u32;
 
-/// What an object made here points at, its `data`. Keep it till the table's owner is drained, since a call
-/// can come in till then. After that callers stop at the owner.
+/// What an object made here points at. Keep it till the table's owner is drained, since calls can come in till then.
 pub const Record = struct {
     trait: *const Trait,
     ctx: usize,
     dispatch: Dispatch,
 };
 
-/// A table for `t` whose methods go to the dispatch in each object's record. One does for every object
-/// of `t` that `owner` guards. It's the host's, so it stays put.
+/// A table for `t` that dispatches through each object's record. One serves every `t` object `owner` guards.
 pub fn table(host: rt.Host, t: *const Trait, owner: ?*rt.Owner) error{OutOfMemory}!*const anyopaque {
     const n = t.methods.len;
     const out = try host.keep(usize, n + 2);
@@ -250,8 +239,7 @@ pub fn table(host: rt.Host, t: *const Trait, owner: ?*rt.Owner) error{OutOfMemor
     return out.ptr;
 }
 
-/// An object of `t` whose methods all go to `dispatch` with `ctx`, guarded by `owner`. It and its table are
-/// the host's, so they stay put. For many objects, share a `table` and keep `Record`s yourself.
+/// An object of `t` whose methods all go to `dispatch` with `ctx`, guarded by `owner`. For many objects, share a `table`.
 pub fn implement(host: rt.Host, t: *const Trait, ctx: usize, dispatch: Dispatch, owner: ?*rt.Owner) error{OutOfMemory}!rt.AnyObject {
     const record = &(try host.keep(Record, 1))[0];
     record.* = .{ .trait = t, .ctx = ctx, .dispatch = dispatch };

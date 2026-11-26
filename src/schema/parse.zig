@@ -32,13 +32,11 @@ pub const Options = struct {
     namespaces: []const Namespace = &.{},
     /// Tools' namespaces in scope without a `use`, so a tool's own files can say `[Sig]`.
     uses: []const []const u8 = &.{},
-    /// Namespaces types are declared in that every file uses by their short names, like C#'s
-    /// `global using`. One nothing declares is skipped.
+    /// Namespaces whose types every file uses by short name, like C#'s `global using`. Undeclared ones are skipped.
     global_uses: []const []const u8 = &.{},
     /// Take any namespace, for tools that only read files.
     any_namespace: bool = false,
-    /// What's declared in a file with no `namespace X;` of its own goes in this namespace. Empty is
-    /// the top. A bundle's files can each have their own, by name, see `FileNamespace`.
+    /// Namespace for what a file without `namespace X;` declares. Empty is the top. See `FileNamespace` for bundles.
     namespace: []const u8 = "",
     file_namespaces: []const FileNamespace = &.{},
 
@@ -49,8 +47,7 @@ pub const Options = struct {
     }
 };
 
-/// The files in a bundle whose names start with `prefix`, like `kai/`, go in `namespace` unless they
-/// say otherwise.
+/// Bundle files whose names start with `prefix`, like `kai/`, go in `namespace` unless they say otherwise.
 pub const FileNamespace = struct {
     prefix: []const u8,
     namespace: []const u8,
@@ -391,15 +388,13 @@ const Parser = struct {
         return p.dotted(ns, n);
     }
 
-    /// What's declared here is called, inside the namespace. A signature's made-up type is always at
-    /// the top, so it's found the same whichever namespace the names in it are looked up from.
+    /// What's declared here is called, inside the namespace. A signature's made-up type is always at the top, so it resolves the same anywhere.
     fn declName(p: *P, n: []const u8) Error![]const u8 {
         if (std.mem.eql(u8, n, Schema.signature_name)) return n;
         return p.qualify(p.ns, n);
     }
 
-    /// Every `namespace X` in the source, before parsing, so a `use` of one is known to be types'.
-    /// Files' own namespaces from the options count too.
+    /// Every `namespace X` in the source and files' own from the options, so a `use` of one is known to be types'.
     fn findNamespaces(p: *P) Error!void {
         // Each open block's namespace and the depth of its braces
         var open: std.ArrayList(struct { ns: []const u8, depth: usize }) = .empty;
@@ -476,8 +471,7 @@ const Parser = struct {
         }
     }
 
-    /// Inside a type, what's nested in it comes first, like C#. So in `trait Vfs`, `Event` is
-    /// `Vfs.Event` if there's one. Its bases and a generic's own names don't count.
+    /// Inside a type its nested ones come first, like C#, so `Event` in `trait Vfs` is `Vfs.Event`. Bases and generic params don't count.
     fn typeScope(region: Region, type_name: []const u8) Region {
         if (std.mem.indexOfScalar(u8, type_name, '<') != null) return region;
         // One declared outside where it's written, like a signature's, keeps the namespace's
@@ -667,8 +661,7 @@ const Parser = struct {
 
     // Types
 
-    /// A type's name, like `Player`, `Scene.Object` or `StdVector<Item*>`. A generic one is named
-    /// as it's written until it's resolved.
+    /// A type's name, like `Player`, `Scene.Object` or `StdVector<Item*>`. Generics stay as written till resolved.
     fn namedType(p: *P, comptime what: []const u8) Error![]const u8 {
         const start = p.tok.start;
         const n = try p.dottedName(what);
@@ -1292,8 +1285,7 @@ const Parser = struct {
         args: []const Ref = &.{},
     };
 
-    /// Every name as the full name of what it means, where it was written, and a type for each
-    /// generic's use.
+    /// Every name as the full name of what it means where written, with a type for each generic use.
     fn resolve(p: *P, s: *Schema) Error!void {
         var r: Resolver = .{ .p = p };
         try r.types.appendSlice(p.arena, s.types);
@@ -1420,8 +1412,7 @@ const Parser = struct {
             };
         }
 
-        /// The full name of what `written` means where it was written, a generic's instance made
-        /// if it's new. Left as it is if it's nothing, for checking to say.
+        /// The full name `written` means where written, making a generic's instance if new. Left as is if unknown, for checking to report.
         fn name(r: *Resolver, written: []const u8, region: Region, subst: Subst, at: usize) Error![]const u8 {
             const p = r.p;
             if (p.generic_uses.get(written)) |g| {

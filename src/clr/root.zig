@@ -1,23 +1,13 @@
-//! .NET's CoreCLR, through hostfxr. Joins the runtime already running in the process, like one a
-//! game or a mod loader started, or starts one from the installed .NET when there isn't one. Then
-//! gets C#'s `[UnmanagedCallersOnly]` methods as function pointers to call.
-//!
-//! A process only gets one runtime, and only the hostfxr that started it can join it, so `open`
-//! always uses the hostfxr that's already loaded if there is one. .NET 10 or newer.
-//!
-//! On Linux, glibc puts every thread's static thread-locals on its stack, and .NET makes some threads
-//! with only 256KB, like its thread pool's. Zig gives each thread a 256KB signal stack as a
-//! thread-local by default, which leaves them no room, so a Zig program hosting .NET there wants
-//! `pub const std_options: std.Options = .{ .signal_stack_size = null };` in its root.
+//! .NET's CoreCLR through hostfxr. Joins the runtime already in the process or starts one, then gets `[UnmanagedCallersOnly]` methods.
+//! A process gets one runtime, joinable only by the hostfxr that started it. .NET 10 or newer.
+//! On Linux a Zig host wants `.signal_stack_size = null` in its `std_options`, since .NET's 256KB threads can't fit Zig's signal stack.
 
 const std = @import("std");
 const sys = @import("salamander_sys");
 pub const fxr = @import("fxr.zig");
 pub const dotnet = @import("dotnet.zig");
 
-/// How the C# methods salamander calls are called, everywhere. C# says so with
-/// `[UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]`, since its own default is stdcall on
-/// 32-bit Windows, and Zig gets stdcall's small struct returns wrong there.
+/// How salamander calls C# methods, cdecl everywhere via `CallConvCdecl`, since Zig gets 32-bit Windows stdcall's small struct returns wrong.
 pub const cc: std.builtin.CallingConvention = .c;
 
 pub const Error = error{
@@ -40,8 +30,7 @@ pub const Error = error{
 };
 
 pub const Options = struct {
-    /// Our `.runtimeconfig.json`. Picks the .NET to start, or has to be one the running .NET
-    /// satisfies to join it.
+    /// Our `.runtimeconfig.json`. Picks the .NET to start, or must be satisfied by the running one to join it.
     runtime_config: []const u8,
     /// Where .NET's installed, to start one from. Found if null.
     dotnet_root: ?[]const u8 = null,
@@ -122,8 +111,7 @@ pub const Host = struct {
         };
     }
 
-    /// Loads `assembly`, a path to a DLL, into the default load context, where the app's own are.
-    /// Loading one that's already there does nothing.
+    /// Loads `assembly`, a DLL path, into the default load context. Loading one twice does nothing.
     pub fn load(self: *const Host, a: std.mem.Allocator, assembly: []const u8) Error!void {
         const path = try fullPath(a, self.io, assembly);
         defer a.free(path);
@@ -136,8 +124,7 @@ pub const Host = struct {
         try check(self.load_assembly_bytes(assembly.ptr, assembly.len, if (symbols != null) s.ptr else null, s.len, null, null));
     }
 
-    /// A static `[UnmanagedCallersOnly]` method of a type in the default load context, by its
-    /// assembly-qualified name like `Game.Exports, Game`. `F` is its pointer type, called with `cc`.
+    /// A static `[UnmanagedCallersOnly]` method by assembly-qualified type name, like `Game.Exports, Game`. `F` is its pointer type, called with `cc`.
     pub fn function(self: *const Host, comptime F: type, a: std.mem.Allocator, type_name: []const u8, method: []const u8) Error!F {
         comptime checkFn(F);
         const t = try fxr.str(a, type_name);
@@ -149,9 +136,7 @@ pub const Host = struct {
         return @ptrCast(@alignCast(out orelse return error.NotFound));
     }
 
-    /// Like `function`, from `assembly`, a path to a DLL, loaded into a load context of its own the
-    /// first time. Its types aren't the default context's, so it's apart from the app's own code,
-    /// and has its own copies of whatever it uses that the app has too.
+    /// Like `function`, from `assembly` loaded once into its own load context, apart from the app's code and its copies of dependencies.
     pub fn isolatedFunction(self: *const Host, comptime F: type, a: std.mem.Allocator, assembly: []const u8, type_name: []const u8, method: []const u8) Error!F {
         comptime checkFn(F);
         const path = try fullPath(a, self.io, assembly);
