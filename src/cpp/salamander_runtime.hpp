@@ -294,10 +294,10 @@ public:
     // Memory kept with the value, for what it points at, like its text. Before settling only.
     void *hold(uintptr_t size, uintptr_t alignment) const { return r_.hold(size, alignment); }
 
-    // What v points at has to last, so keep it with hold
-    void resolve(const T &v)
-        requires(!std::is_void_v<T>)
-    {
+    // What v points at has to last, so keep it with hold. A template, so Settle<void> never forms a void&
+    template <class U = T>
+        requires(!std::is_void_v<U>)
+    void resolve(const U &v) {
         r_.resolve(const_cast<void *>(static_cast<const void *>(&v)));
         r_ = Resolver{};
     }

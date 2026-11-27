@@ -18,6 +18,9 @@ static_assert(sizeof(Scene::Map_u32_Scene_NodePtr) == 4 * sizeof(void *));
 static_assert(std::is_aggregate_v<Freecam> && std::is_trivially_copyable_v<Freecam>);
 static_assert(Damageable::extends<Transform> && Damageable::extends<Named> && !Freecam::extends<Transform>);
 static_assert(!std::is_copy_constructible_v<sal::Future<Vec3>> && std::is_move_constructible_v<sal::Future<Vec3>>);
+// Ones with no value build too, with what settles them
+template class sal::Future<void>;
+template class sal::Settle<void>;
 
 // A trait implemented in C++, with only some of its methods
 
