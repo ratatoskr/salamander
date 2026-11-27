@@ -22,8 +22,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "salamander_schema", .module = schema },
         .{ .name = "salamander_runtime", .module = runtime },
     });
-    _ = ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }});
-    _ = ctx.addModule("cpp", &.{.{ .name = "salamander_schema", .module = schema }});
+    // With the runtime's own core.sal, so tools can write its header too
+    ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
+    ctx.addModule("cpp", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
     _ = ctx.addModule("rust", &.{.{ .name = "salamander_schema", .module = schema }});
     // C#, with the runtime's own core.sal so tools can write its C# too
     ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
@@ -98,8 +99,16 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "salamander_schema", .module = host_schema },
                 .{ .name = "salamander_zig", .module = host_zig },
-                .{ .name = "salamander_c", .module = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
-                .{ .name = "salamander_cpp", .module = host.module("cpp", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
+                .{ .name = "salamander_c", .module = blk: {
+                    const c = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }});
+                    c.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
+                    break :blk c;
+                } },
+                .{ .name = "salamander_cpp", .module = blk: {
+                    const cpp = host.module("cpp", &.{.{ .name = "salamander_schema", .module = host_schema }});
+                    cpp.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
+                    break :blk cpp;
+                } },
                 .{ .name = "salamander_rust", .module = host.module("rust", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
                 .{ .name = "salamander_cs", .module = blk: {
                     const cs = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }});

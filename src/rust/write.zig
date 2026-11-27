@@ -1031,7 +1031,8 @@ const Gen = struct {
         }
         if (!callable(m)) return;
         const indent: []const u8 = if (in != null) "    " else "";
-        const fname = try g.field(m.name);
+        // A top-level one goes in its namespace's module by its last name
+        const fname = try g.field(if (in != null) m.name else (try g.scopeOf(m.name)).leaf);
         if (in == null) try g.claim(fname);
         var ps: std.ArrayList(u8) = .empty;
         var args: std.ArrayList(u8) = .empty;
@@ -1071,7 +1072,7 @@ const Gen = struct {
         const t = try g.decl(v.type);
         const ret = if (stored) t else try g.fmt("*mut {s}", .{t});
         const indent: []const u8 = if (in != null) "    " else "";
-        const fname = try g.field(v.name);
+        const fname = try g.field(if (in != null) v.name else (try g.scopeOf(v.name)).leaf);
         if (in == null) try g.claim(fname);
         const sal_ = g.sal();
         try g.print("\n{s}// {s}, null till it's found\n{s}#[allow(clippy::all, unused_unsafe)]\n{s}pub unsafe fn {s}() -> {s} {{\n{s}    unsafe {{\n{s}        static SAL_SITE: {s}::declared::Site = {s}::declared::Site::new({s});\n{s}        let sal_at = SAL_SITE.get();\n", .{ indent, if (stored) "What's stored there" else "Where it is", indent, indent, fname, ret, indent, indent, sal_, sal_, name_id, indent });
@@ -1200,4 +1201,10 @@ test "declared code gets its name, a pointer type and a call" {
         "pub type WorldSpawnFn = unsafe extern \"C\" fn(*mut Player) -> *mut World;",
         "pub unsafe fn seen() -> *mut u8 {",
     });
+}
+
+test "top-level game code in a namespace goes in its module by its last name" {
+    const text = try writeFor("namespace Game { [Sig(\"76\")] static u8 seen; [Sig(\"E8\")] i32 entry(u32 a); }", .{});
+    defer std.testing.allocator.free(text);
+    try expectParts(text, &.{ "pub mod game {\n", "pub unsafe fn seen() -> *mut u8 {", "pub unsafe fn entry(a: u32) -> i32 {", "pub const SEEN_NAME: &str = \"Game.seen\";" });
 }

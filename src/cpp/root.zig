@@ -1,5 +1,7 @@
 //! C++ headers for `.sal` files, over `salamander.hpp`.
 
+const std = @import("std");
+const salamander_schema = @import("salamander_schema");
 const writer = @import("write.zig");
 pub const write = writer.write;
 pub const Options = writer.Options;
@@ -10,6 +12,16 @@ pub const Error = writer.Error;
 pub const base_header = @embedFile("salamander.hpp");
 /// What plugins use over the core traits, included by generated headers.
 pub const runtime_header = @embedFile("salamander_runtime.hpp");
+
+/// The runtime's own traits, which every generated header uses.
+pub const core_sal = @embedFile("core.sal");
+
+/// `core_sal` as C++, `salamander_core.hpp`, for `pointer_size`.
+pub fn writeCore(gpa: std.mem.Allocator, w: *std.Io.Writer, pointer_size: u8) (Error || salamander_schema.SignatureError)!void {
+    var parsed = try salamander_schema.parse(gpa, core_sal, .{ .pointer_size = pointer_size }, null);
+    defer parsed.deinit();
+    try write(gpa, parsed.schema, w, .{ .label = "core.sal", .core = true }, null);
+}
 
 test {
     _ = writer;

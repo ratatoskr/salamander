@@ -56,6 +56,8 @@ typedef struct sal_string {
 } sal_string;
 
 #define SAL_STR(literal) ((sal_string){ (literal), sizeof(literal) - 1 })
+/* The same for an initializer, like a static's, where MSVC doesn't take SAL_STR. */
+#define SAL_STR_INIT(literal) { (literal), sizeof(literal) - 1 }
 
 typedef struct sal_MethodInfo {
     sal_string name;

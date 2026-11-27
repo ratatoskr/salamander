@@ -363,7 +363,7 @@ const from_rust = struct {
             var handle: ?*anyopaque = null;
         };
         if (lib.handle == null) lib.handle = try @import("salamander_sys").library.load(library);
-        return @ptrCast(@import("salamander_sys").library.symbol(lib.handle.?, name) orelse return error.MissingExport);
+        return @ptrCast(@alignCast(@import("salamander_sys").library.symbol(lib.handle.?, name) orelse return error.MissingExport));
     }
 
     fn call(comptime name: [:0]const u8, comptime T: type, args: anytype) !@typeInfo(@typeInfo(T).pointer.child).@"fn".return_type.? {
