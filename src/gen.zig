@@ -8,6 +8,10 @@
 //! `--file-namespace PREFIX=NS` puts files whose names start with PREFIX in NS instead, like a
 //! dependency's `freecam/=Freecam`.
 //! `--global-use NS` lets every file use NS's types by their short names, like C#'s `global using`.
+//! `salamander-gen json <out.json> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--prefix P]`, everything with
+//! docs and layouts, and how each language writes it, for docs and tools. The flags mean what they do for each language.
+//! `salamander-gen ts <out.d.ts> <in> [--module NAME]` and `lua <out.lua> <in> [--module NAME]`, typings for scripts'
+//! editors, with each top namespace a global, or on what `NAME` gives.
 //! `salamander-gen bundle <out.sal> <in>`
 //! `<in>` is a `.sal` file or a folder whose `.sal` files, nested too, make one schema.
 //! `--use NS` puts a tool's namespace in scope, like a `use` in every file.
@@ -24,6 +28,9 @@ const salamander_c = @import("salamander_c");
 const salamander_cs = @import("salamander_cs");
 const salamander_cpp = @import("salamander_cpp");
 const salamander_rust = @import("salamander_rust");
+const salamander_json = @import("salamander_json");
+const salamander_types = @import("salamander_types");
+const salamander_lang = @import("salamander_lang");
 
 const Schema = salamander_schema.Schema;
 
@@ -37,13 +44,17 @@ pub fn main(init: std.process.Init) !void {
     const is_cs = std.mem.eql(u8, lang, "cs");
     const is_cpp = std.mem.eql(u8, lang, "cpp");
     const is_rust = std.mem.eql(u8, lang, "rust");
+    const is_json = std.mem.eql(u8, lang, "json");
     const is_bundle = std.mem.eql(u8, lang, "bundle");
-    if (!is_c and !is_cs and !is_cpp and !is_rust and !is_bundle and !std.mem.eql(u8, lang, "zig")) return usage();
+    const is_ts = std.mem.eql(u8, lang, "ts");
+    const is_lua = std.mem.eql(u8, lang, "lua");
+    if (!is_c and !is_cs and !is_cpp and !is_rust and !is_json and !is_bundle and !is_ts and !is_lua and !std.mem.eql(u8, lang, "zig")) return usage();
     const out_path = args.next() orelse return usage();
     const in_path = args.next() orelse return usage();
     var pointer_size: u8 = @sizeOf(usize);
     var runtime: []const u8 = "salamander_runtime";
     var check = false;
+    var module: ?[]const u8 = null;
     var prefix: []const u8 = "";
     var namespace: []const u8 = "";
     var class: []const u8 = "Schema";
@@ -66,6 +77,8 @@ pub fn main(init: std.process.Init) !void {
             runtime = args.next() orelse return usage();
         } else if (std.mem.eql(u8, arg, "--check")) {
             check = true;
+        } else if (std.mem.eql(u8, arg, "--module")) {
+            module = args.next() orelse return usage();
         } else if (std.mem.eql(u8, arg, "--prefix")) {
             prefix = args.next() orelse return usage();
         } else if (std.mem.eql(u8, arg, "--namespace")) {
@@ -127,7 +140,25 @@ pub fn main(init: std.process.Init) !void {
 
     var out: std.Io.Writer.Allocating = .init(arena);
     const label = std.fs.path.basename(in_path);
-    const written = if (is_c)
+    const written = if (is_ts)
+        salamander_types.ts.globals(&out.writer, parsed.schema, source, &.{}, module)
+    else if (is_lua)
+        salamander_types.luals.globals(&out.writer, parsed.schema, source, &.{}, module)
+    else if (is_json)
+        salamander_json.write(arena, parsed.schema, &out.writer, .{ .label = label, .source = source, .langs = try langsFor(arena, parsed.schema, .{
+            .label = label,
+            .source = source,
+            .runtime = runtime,
+            .prefix = prefix,
+            .namespace = namespace,
+            .class = class,
+            .aliases = aliases.items,
+            .c_aliases = c_aliases.items,
+            .cpp_aliases = cpp_aliases.items,
+            .cs_aliases = cs_aliases.items,
+            .rust_aliases = rust_aliases.items,
+        }) })
+    else if (is_c)
         salamander_c.write(arena, parsed.schema, &out.writer, .{ .label = label, .prefix = prefix, .core = core, .source = source, .aliases = c_aliases.items }, &diag)
     else if (is_rust)
         salamander_rust.write(arena, parsed.schema, &out.writer, .{ .label = label, .namespace = namespace, .core = core, .source = source, .aliases = rust_aliases.items }, &diag)
@@ -141,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
         error.NameClash => fail(in_path, is_dir, diag.message()),
         else => return err,
     };
-    const text = if (is_c or is_cs or is_cpp or is_rust) out.written() else try formatted(arena, out.written());
+    const text = if (is_ts or is_lua or is_c or is_cs or is_cpp or is_rust or is_json) out.written() else try formatted(arena, out.written());
     if (check) {
         const have = std.Io.Dir.cwd().readFileAlloc(io, out_path, arena, .limited(16 << 20)) catch "";
         if (!std.mem.eql(u8, std.mem.trim(u8, have, "\r\n"), std.mem.trim(u8, text, "\r\n"))) {
@@ -151,6 +182,52 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = text });
+}
+
+const LangOptions = struct {
+    label: []const u8,
+    source: []const u8,
+    runtime: []const u8,
+    prefix: []const u8,
+    namespace: []const u8,
+    class: []const u8,
+    aliases: []const salamander_zig.Alias,
+    c_aliases: []const salamander_c.Alias,
+    cpp_aliases: []const salamander_cpp.Alias,
+    cs_aliases: []const salamander_cs.Alias,
+    rust_aliases: []const salamander_rust.Alias,
+};
+
+/// Every language's spellings, in the docs' order. One whose generator can't write the schema is left out, saying why.
+fn langsFor(arena: std.mem.Allocator, s: Schema, o: LangOptions) ![]const salamander_lang.Names {
+    var out: std.ArrayList(salamander_lang.Names) = .empty;
+    const ts = try arena.create(salamander_types.ts.Names);
+    ts.* = .init(arena, s);
+    try out.append(arena, .of(salamander_types.ts.Names, "ts", "TypeScript", ts));
+    const lua = try arena.create(salamander_types.luals.Names);
+    lua.* = .init(arena, s);
+    try out.append(arena, .of(salamander_types.luals.Names, "lua", "Lua", lua));
+    try addLang(arena, &out, salamander_cs, salamander_cs.Options, "cs", "C#", s, .{ .label = o.label, .namespace = o.namespace, .class = o.class, .source = o.source, .aliases = o.cs_aliases });
+    try addLang(arena, &out, salamander_cpp, salamander_cpp.Options, "cpp", "C++", s, .{ .label = o.label, .namespace = o.namespace, .source = o.source, .aliases = o.cpp_aliases });
+    try addLang(arena, &out, salamander_rust, salamander_rust.Options, "rust", "Rust", s, .{ .label = o.label, .namespace = o.namespace, .source = o.source, .aliases = o.rust_aliases });
+    try addLang(arena, &out, salamander_zig, salamander_zig.WriteOptions, "zig", "Zig", s, .{ .label = o.label, .runtime = o.runtime, .source = o.source, .aliases = o.aliases });
+    try addLang(arena, &out, salamander_c, salamander_c.Options, "c", "C", s, .{ .label = o.label, .prefix = o.prefix, .source = o.source, .aliases = o.c_aliases });
+    return out.items;
+}
+
+fn addLang(arena: std.mem.Allocator, out: *std.ArrayList(salamander_lang.Names), comptime lang: type, comptime O: type, id: []const u8, label: []const u8, s: Schema, options: O) !void {
+    // Kept, since the generator holds on to it
+    const diag = try arena.create(Schema.Diagnostic);
+    diag.* = .{};
+    const names = try arena.create(lang.Names);
+    names.* = lang.Names.init(arena, s, options, diag) catch |err| switch (err) {
+        error.NameClash => {
+            std.debug.print("leaving {s} out: {s}\n", .{ label, diag.message() });
+            return;
+        },
+        else => return err,
+    };
+    try out.append(arena, .of(lang.Names, id, label, names));
 }
 
 /// Like `zig fmt` leaves it, so the file stays the same after it.
@@ -208,6 +285,9 @@ fn usage() error{Usage} {
         \\       salamander-gen cs <out.cs> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--core] [--check]
         \\       salamander-gen cpp <out.hpp> <in> [--pointer-size N] [--namespace NS] [--core] [--use NS]... [--global-use NS]... [--default-namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--alias PREFIX=HEADER]... [--check]
         \\       salamander-gen rust <out.rs> <in> [--pointer-size N] [--namespace MOD] [--core] [--use NS]... [--global-use NS]... [--default-namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--alias PREFIX=PATH]... [--check]
+        \\       salamander-gen json <out.json> <in> [--pointer-size N] [--namespace NS] [--class NAME] [--prefix P] [--use NS]... [--global-use NS]... [--default-namespace NS] [--file-namespace PREFIX=NS]... [--instance NS.TAG=AS]... [--with NAME DIR]... [--alias PREFIX=TARGET]... [--check]
+        \\       salamander-gen ts <out.d.ts> <in> [--module NAME] [--use NS]... [--global-use NS]... [--with NAME DIR]... [--check]
+        \\       salamander-gen lua <out.lua> <in> [--module NAME] [--use NS]... [--global-use NS]... [--with NAME DIR]... [--check]
         \\       salamander-gen bundle <out.sal> <in>
         \\<in> is a .sal file, or a folder of them that make one schema.
         \\

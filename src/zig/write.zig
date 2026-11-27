@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
+const lang = @import("salamander_lang");
 
 const plan = salamander_schema.plan;
 
@@ -388,8 +389,8 @@ const Gen = struct {
         while (at) |cur| : (at = g.s.baseOf(cur)) try chain.insert(g.a, 0, cur);
         for (chain.items) |cur| for (cur.kind.@"struct".fields) |f| {
             try g.claim(&names, t.name, f.name);
-            try w.print("    {f}: ", .{id(f.name)});
-            try g.plainType(f.type);
+            try w.writeAll("    ");
+            try g.fieldHead(true, f);
             try w.writeAll(" = ");
             try g.plainDefault(f.type);
             try w.writeAll(",\n");
@@ -608,8 +609,8 @@ const Gen = struct {
             .field => |f| {
                 try g.claim(&names, t.name, f.field.name);
                 if (f.field.type == .array) if (f.field.type.array.count) |n| try counted.append(g.a, .{ .field = f.field.name, .count = n, .child = f.field.type.array.child.*, .alignment = if (f.alignment < f.natural) f.alignment else null });
-                try w.print("    {f}: ", .{id(f.field.name)});
-                try g.memType(f.field.type);
+                try w.writeAll("    ");
+                try g.fieldHead(false, f.field);
                 if (f.alignment < f.natural) try w.print(" align({d})", .{f.alignment});
                 // Zero, like the comptime types, outside unions
                 if (t.kind != .@"union") {
@@ -783,8 +784,8 @@ const Gen = struct {
         const w = g.w;
         const full = if (owner.len == 0) v.name else try std.fmt.allocPrint(g.a, "{s}.{s}", .{ owner, v.name });
         if (v.type == .pointer) {
-            try w.print("\n{s}/// `{s}`, what's stored there.\n{s}pub fn {f}() anyerror!", .{ indent, full, indent, id(v.name) });
-            try g.memType(v.type);
+            try w.print("\n{s}/// `{s}`, what's stored there.\n{s}pub ", .{ indent, full, indent });
+            try g.staticHead(v);
             try w.print(" {{\n{s}    const at: *align(1) const ", .{indent});
             try g.memType(v.type);
             try w.print(" = @ptrFromInt(try {s}addresses.{f}());\n{s}    return at.*;\n{s}}}\n", .{ try g.qual(owner), id(v.name), indent, indent });
@@ -795,13 +796,8 @@ const Gen = struct {
             try w.print(" {{\n{s}    return (try {s}{f}()) orelse error.NotThereYet;\n{s}}}\n", .{ indent, try g.qual(owner), id(v.name), indent });
             return;
         }
-        // Methods need a struct's own alignment. Anything else could be anywhere
-        const whole = v.type == .named and switch (g.s.findType(v.type.named).?.kind) {
-            .@"struct", .@"union" => true,
-            else => false,
-        };
-        try w.print("\n{s}/// `{s}`, the global itself.\n{s}pub fn {f}() anyerror!{s}", .{ indent, full, indent, id(v.name), if (whole) "*" else "*align(1) " });
-        try g.memType(v.type);
+        try w.print("\n{s}/// `{s}`, the global itself.\n{s}pub ", .{ indent, full, indent });
+        try g.staticHead(v);
         try w.print(" {{\n{s}    return @ptrFromInt(try {s}addresses.{f}());\n{s}}}\n", .{ indent, try g.qual(owner), id(v.name), indent });
     }
 
@@ -810,25 +806,18 @@ const Gen = struct {
         const w = g.w;
         const full = if (owner.len == 0) m.name else try std.fmt.allocPrint(g.a, "{s}.{s}", .{ owner, m.name });
         const has_this = owner.len > 0 and !m.static;
-        try w.print("\n{s}/// `{s}`{s}.\n{s}pub fn {f}(", .{ indent, full, if (m.virtual != null) ", through the vtable" else "", indent, id(m.name) });
         var used: std.ArrayList([]const u8) = .empty;
         try used.appendSlice(g.a, scope);
-        if (has_this) {
-            try used.append(g.a, "self");
-            try w.print("self: *{f}", .{id(self_type)});
-        }
+        if (has_this) try used.append(g.a, "self");
         var params: std.ArrayList([]const u8) = .empty;
-        for (m.signature.params, 0..) |p, i| {
+        for (m.signature.params) |p| {
             var n = p.name;
             while (contains(used.items, n)) n = try std.fmt.allocPrint(g.a, "{s}_", .{n});
             try used.append(g.a, n);
             try params.append(g.a, n);
-            if (has_this or i > 0) try w.writeAll(", ");
-            try w.print("{f}: ", .{id(n)});
-            try g.memType(p.type);
         }
-        try w.writeAll(") ");
-        try g.gameReturn(m.signature.ret);
+        try w.print("\n{s}/// `{s}`{s}.\n{s}pub ", .{ indent, full, if (m.virtual != null) ", through the vtable" else "", indent });
+        try g.declaredHead(if (has_this) self_type else null, m, params.items);
         const q = try g.qual(owner);
         try w.print(" {{\n{s}    const f: *const {s}Fns.{f} = @ptrFromInt(", .{ indent, q, id(m.name) });
         if (m.virtual != null) {
@@ -916,8 +905,8 @@ const Gen = struct {
 
     fn constant(g: *Gen, k: Schema.Constant) Error!void {
         const w = g.w;
-        try w.print("pub const {f}: ", .{id(k.name)});
-        try g.paramType(k.type);
+        try w.writeAll("pub ");
+        try g.constantHead(k);
         switch (k.value) {
             .int => |n| try w.print(" = {d};\n", .{n}),
             .float => |f| try w.print(" = {d};\n", .{f}),
@@ -999,13 +988,8 @@ const Gen = struct {
                 try g.plainMethod(name, m, params.items);
                 continue;
             }
-            try w.print("\n    pub fn {f}(self: {f}", .{ id(m.name), id(name) });
-            for (m.signature.params, params.items) |p, n| {
-                try w.print(", {f}: ", .{id(n)});
-                try g.paramType(p.type);
-            }
-            try w.writeAll(") ");
-            try g.wrapAsync(m.signature.ret, m.async);
+            try w.writeAll("\n    pub ");
+            try g.methodHead(name, m, params.items);
             try w.print(" {{\n        return rt.invoke({f}, \"{s}\", self, .{{", .{ id(name), m.name });
             // Spaced like zig fmt, which only pads two or more
             const pad = params.items.len > 1;
@@ -1034,17 +1018,71 @@ const Gen = struct {
         try w.writeAll("};\n");
     }
 
+    // How each thing's declared, which `Names` gives docs too
+
+    /// `fn heal(self: Player, amount: u32) bool`, a trait's method, plain when it takes or gives what converts. `params` are what it calls them.
+    fn methodHead(g: *Gen, trait_name: []const u8, m: *const Schema.Method, params: []const []const u8) Error!void {
+        const w = g.w;
+        const plain = !m.async and g.touches(m.signature);
+        try w.print("fn {f}(self: {f}", .{ id(m.name), id(trait_name) });
+        for (m.signature.params, params) |p, n| {
+            try w.print(", {f}: ", .{id(n)});
+            if (plain) try g.plainParam(p.type) else try g.paramType(p.type);
+        }
+        try w.writeAll(") ");
+        if (plain) try g.plainReturn(m.signature.ret) else try g.wrapAsync(m.signature.ret, m.async);
+    }
+
+    /// `pos: Vec3`, a plain struct's field or one as it is in memory.
+    fn fieldHead(g: *Gen, plain: bool, f: Schema.Field) Error!void {
+        try g.w.print("{f}: ", .{id(f.name)});
+        if (plain) try g.plainType(f.type) else try g.memType(f.type);
+    }
+
+    /// `fn heal(self: *Player, amount: u32) bool`, existing code's function, taking `self` when there's a `self_type`.
+    fn declaredHead(g: *Gen, self_type: ?[]const u8, m: *const Schema.Method, params: []const []const u8) Error!void {
+        const w = g.w;
+        try w.print("fn {f}(", .{id(m.name)});
+        if (self_type) |t| try w.print("self: *{f}", .{id(t)});
+        for (m.signature.params, params, 0..) |p, n, i| {
+            if (self_type != null or i > 0) try w.writeAll(", ");
+            try w.print("{f}: ", .{id(n)});
+            try g.memType(p.type);
+        }
+        try w.writeAll(") ");
+        try g.gameReturn(m.signature.ret);
+    }
+
+    /// `fn instance() anyerror!?*Player`: a pointer static gives what's stored there, anything else a pointer to it.
+    fn staticHead(g: *Gen, v: *const Schema.Static) Error!void {
+        try g.w.print("fn {f}() anyerror!", .{id(v.name)});
+        try g.staticRet(v);
+    }
+
+    fn staticRet(g: *Gen, v: *const Schema.Static) Error!void {
+        const w = g.w;
+        if (v.type != .pointer) {
+            // Methods need a struct's own alignment. Anything else could be anywhere
+            const whole = v.type == .named and switch (g.s.findType(v.type.named).?.kind) {
+                .@"struct", .@"union" => true,
+                else => false,
+            };
+            try w.writeAll(if (whole) "*" else "*align(1) ");
+        }
+        try g.memType(v.type);
+    }
+
+    fn constantHead(g: *Gen, k: Schema.Constant) Error!void {
+        try g.w.print("const {f}: ", .{id(k.name)});
+        try g.paramType(k.type);
+    }
+
     /// A method taking and giving plain types, converting them for the call.
     fn plainMethod(g: *Gen, name: []const u8, m: *const Schema.Method, params: []const []const u8) Error!void {
         const w = g.w;
         const sig = m.signature;
-        try w.print("\n    pub fn {f}(self: {f}", .{ id(m.name), id(name) });
-        for (sig.params, params) |p, n| {
-            try w.print(", {f}: ", .{id(n)});
-            try g.plainParam(p.type);
-        }
-        try w.writeAll(") ");
-        try g.plainReturn(sig.ret);
+        try w.writeAll("\n    pub ");
+        try g.methodHead(name, m, params);
         try w.writeAll(" {\n");
         try w.writeAll("        var arena: @import(\"std\").heap.ArenaAllocator = .init(@import(\"std\").heap.smp_allocator);\n        defer arena.deinit();\n");
         try w.print("        const args: rt.Args({f}, \"{s}\") = .{{", .{ id(name), m.name });
@@ -1094,6 +1132,164 @@ const Gen = struct {
     }
 };
 
+//// How Zig names and declares each thing, from the same builders the writer uses. `a` should be an arena.
+/// Names are namespaced, like `Game.Player`, which Zig has as well as the flat `Game_Player`.
+pub const Names = struct {
+    g: *Gen,
+    /// Flat names to their namespaced ones.
+    dotted: std.StringHashMapUnmanaged([]const u8) = .empty,
+
+    pub fn init(a: std.mem.Allocator, s: Schema, options: Options, diagnostic: ?*Schema.Diagnostic) Error!Names {
+        const g = try a.create(Gen);
+        g.* = .{ .s = s, .w = try lang.sink(a), .a = a, .diag = diagnostic orelse try a.create(Schema.Diagnostic), .source = options.source, .aliases = options.aliases };
+        try g.file(options);
+        var n: Names = .{ .g = g };
+        for (s.types) |t| {
+            if (t.nested) continue;
+            try n.addDotted(t.name);
+            if (t.kind == .@"error") try n.addDotted(try g.codeName(t.name));
+        }
+        for (s.traits) |t| try n.addDotted(t.name);
+        for (s.constants) |c| try n.addDotted(c.name);
+        for (s.functions) |f| try n.addDotted(f.name);
+        for (s.statics) |v| try n.addDotted(v.name);
+        return n;
+    }
+
+    fn addDotted(n: *Names, name: []const u8) Error!void {
+        if (std.mem.indexOfScalar(u8, name, '.') == null or std.mem.indexOfScalar(u8, name, '<') != null) return;
+        try n.dotted.put(n.g.a, try n.g.typeName(name), name);
+    }
+
+    /// `s` with flat names as namespaced ones, except the one it declares, which can't have dots.
+    fn undot(n: *const Names, s: []const u8) Error![]const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        var i: usize = 0;
+        for ([_][]const u8{ "fn ", "const " }) |head| if (std.mem.startsWith(u8, s, head)) {
+            i = head.len;
+            while (i < s.len and (std.ascii.isAlphanumeric(s[i]) or s[i] == '_' or s[i] == '@' or s[i] == '"')) i += 1;
+            try out.appendSlice(n.g.a, s[0..i]);
+        };
+        while (i < s.len) {
+            if (!(std.ascii.isAlphanumeric(s[i]) or s[i] == '_')) {
+                try out.append(n.g.a, s[i]);
+                i += 1;
+                continue;
+            }
+            var end = i;
+            while (end < s.len and (std.ascii.isAlphanumeric(s[end]) or s[end] == '_')) end += 1;
+            const word = s[i..end];
+            // Not a field or decl after a dot, like `rt.Promise`
+            const after_dot = i > 0 and s[i - 1] == '.';
+            try out.appendSlice(n.g.a, if (after_dot) word else n.dotted.get(word) orelse word);
+            i = end;
+        }
+        return out.items;
+    }
+
+    /// What `f` writes through the generator, on its own.
+    fn text(n: *const Names, comptime f: anytype, args: anytype) Error![]const u8 {
+        const g = n.g;
+        const saved = g.w;
+        defer g.w = saved;
+        var out: std.Io.Writer.Allocating = .init(g.a);
+        g.w = &out.writer;
+        try @call(.auto, f, .{g} ++ args);
+        return n.undot(out.written());
+    }
+
+    fn idText(n: *const Names, name: []const u8) Error![]const u8 {
+        return std.fmt.allocPrint(n.g.a, "{f}", .{id(name)});
+    }
+
+    /// A namespaced name works as well as its flat one, except for generics.
+    fn nameOf(n: *const Names, name: []const u8) Error![]const u8 {
+        if (std.mem.indexOfScalar(u8, name, '<') == null) return name;
+        return n.idText(name);
+    }
+
+    /// Each parameter, typed by `f`.
+    fn params(n: *const Names, m: *const Schema.Method, comptime f: anytype) Error![]const lang.Param {
+        const out = try n.g.a.alloc(lang.Param, m.signature.params.len);
+        for (m.signature.params, out) |p, *q| {
+            const pn = try n.idText(p.name);
+            const pt = try n.text(f, .{p.type});
+            q.* = .{ .name = pn, .type = pt, .text = try std.fmt.allocPrint(n.g.a, "{s}: {s}", .{ pn, pt }) };
+        }
+        return out;
+    }
+
+    fn names(n: *const Names, m: *const Schema.Method) Error![]const []const u8 {
+        const out = try n.g.a.alloc([]const u8, m.signature.params.len);
+        for (m.signature.params, out) |p, *q| q.* = p.name;
+        return out;
+    }
+
+    fn leafPath(n: *const Names, full: []const u8) Error!lang.Decl {
+        const leaf = if (Schema.namespaceEnd(full)) |e| full[e + 1 ..] else full;
+        return .{ .name = try n.idText(leaf), .path = try n.nameOf(full) };
+    }
+
+    pub fn typeName(n: *const Names, t: *const Schema.Type) Error!?lang.Decl {
+        return try n.leafPath(t.name);
+    }
+
+    pub fn traitName(n: *const Names, t: *const Schema.Trait) Error!?lang.Decl {
+        return try n.leafPath(t.name);
+    }
+
+    pub fn method(n: *const Names, t: *const Schema.Trait, m: *const Schema.Method) Error!?lang.Decl {
+        const plain = !m.async and n.g.touches(m.signature);
+        return .{
+            .name = try n.idText(m.name),
+            .params = if (plain) try n.params(m, Gen.plainParam) else try n.params(m, Gen.paramType),
+            .type = if (plain) try n.text(Gen.plainReturn, .{m.signature.ret}) else try n.text(Gen.wrapAsync, .{ m.signature.ret, m.async }),
+            .text = try n.text(Gen.methodHead, .{ t.name, m, try n.names(m) }),
+        };
+    }
+
+    pub fn field(n: *const Names, t: *const Schema.Type, f: *const Schema.Field) Error!?lang.Decl {
+        const plain = n.g.isLifted(t.name);
+        return .{
+            .name = try n.idText(f.name),
+            .type = if (plain) try n.text(Gen.plainType, .{f.type}) else try n.text(Gen.memType, .{f.type}),
+            .text = try n.text(Gen.fieldHead, .{ plain, f.* }),
+        };
+    }
+
+    /// An enum's value, an error or a bitfield's member.
+    pub fn member(n: *const Names, t: *const Schema.Type, name: []const u8) Error!?lang.Decl {
+        const prefix = switch (t.kind) {
+            .@"enum" => ".",
+            .@"error" => "error.",
+            else => "",
+        };
+        return .{ .name = try std.fmt.allocPrint(n.g.a, "{s}{f}", .{ prefix, id(name) }) };
+    }
+
+    pub fn function(n: *const Names, in: ?*const Schema.Type, m: *const Schema.Method) Error!?lang.Decl {
+        var d: lang.Decl = if (in != null) .{ .name = try n.idText(m.name) } else try n.leafPath(m.name);
+        d.params = try n.params(m, Gen.memType);
+        d.type = try n.text(Gen.gameReturn, .{m.signature.ret});
+        d.text = try n.text(Gen.declaredHead, .{ if (in != null and !m.static) in.?.name else null, m, try n.names(m) });
+        return d;
+    }
+
+    pub fn static(n: *const Names, in: ?*const Schema.Type, v: *const Schema.Static) Error!?lang.Decl {
+        var d: lang.Decl = if (in != null) .{ .name = try n.idText(v.name) } else try n.leafPath(v.name);
+        d.type = try n.text(Gen.staticRet, .{v});
+        d.text = try n.text(Gen.staticHead, .{v});
+        return d;
+    }
+
+    pub fn constant(n: *const Names, c: *const Schema.Constant) Error!?lang.Decl {
+        var d = try n.leafPath(c.name);
+        d.type = try n.text(Gen.paramType, .{c.type});
+        d.text = try n.text(Gen.constantHead, .{c.*});
+        return d;
+    }
+};
+
 fn hasGameCode(s: Schema) bool {
     if (s.functions.len + s.statics.len > 0) return true;
     for (s.types) |t| switch (t.kind) {
@@ -1103,10 +1299,7 @@ fn hasGameCode(s: Schema) bool {
     return false;
 }
 
-fn contains(list: []const []const u8, n: []const u8) bool {
-    for (list) |o| if (std.mem.eql(u8, o, n)) return true;
-    return false;
-}
+const contains = lang.contains;
 
 test "writes the types" {
     var diag: Schema.Diagnostic = .{};
@@ -1240,4 +1433,19 @@ test "aliased files come from another module" {
     };
     try std.testing.expect(std.mem.indexOf(u8, text, "pub const Vec3 = extern struct") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pub const Named = @import(\"tuft_math\").raw.Named;") != null);
+}
+
+test "Names give what the writer declares" {
+    const make = struct {
+        fn make(a: std.mem.Allocator, s: Schema) anyerror!Names {
+            return .init(a, s, .{}, null);
+        }
+    }.make;
+    try lang.expectNames(Names, make, .{
+        .method = "fn count(self: G.Counter, who: []const u8) u32",
+        .field = "hp: u32",
+        .function = "fn heal(self: *G.Player, amount: u32) bool",
+        .static = "fn instance() anyerror!?*G.Player",
+        .constant = "const G_max_players: u32",
+    });
 }

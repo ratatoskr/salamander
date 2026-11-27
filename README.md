@@ -17,6 +17,7 @@ Pre-release. Expect breaking changes.
 - Generates C++20 headers, with no exceptions or RTTI needed. Namespaces, `enum class`, and trait objects with methods taking `std::string_view`, `std::span` and `std::optional`. Results come back as `sal::Result`, and async methods as a `sal::Future` to `co_await`, or to give back from a coroutine. Any class implements a trait with the methods it has. Futures and held objects let go when they're done, and a game's declared functions and globals are called through methods on its structs.
 - Generates Rust over the `salamander` crate in `src/rust`. Namespaces are modules, and trait objects have methods taking `&str`, slices and `Option`, giving `Result`s, with async methods giving a `salamander::Future` to `.await`. Any type implements a trait through its `...Impl` trait, closures are function values, and `salamander::spawn` makes an async block an async method.
 - TypeScript and LuaLS typings for scripts' editors.
+- JSON of a whole schema, with docs from its comments, where each thing is, struct layouts, and how each language writes every name and method, for docs sites and tools.
 - Trait objects that cross DLLs, checked by hash, and stop when their owner goes.
 - JavaScript (QuickJS-ng) and Lua 5.5 scripts call traits and implement them.
 - Hosts .NET 10+ through hostfxr, joining the CoreCLR already in the process or starting one, and calls C#'s `[UnmanagedCallersOnly]` methods.

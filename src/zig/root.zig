@@ -8,6 +8,7 @@ pub const write = writer.write;
 pub const WriteOptions = writer.Options;
 pub const Alias = writer.Alias;
 pub const WriteError = writer.Error;
+pub const Names = writer.Names;
 
 test {
     _ = writer;

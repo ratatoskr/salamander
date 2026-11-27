@@ -547,6 +547,97 @@ fn paramName(w: *Writer, name: []const u8) Error!void {
     if (keywords.has(name)) try w.writeByte('_');
 }
 
+// Names
+
+const lang = @import("salamander_lang");
+const NamesError = Writer.Error || error{OutOfMemory};
+
+/// How scripts name and declare each thing, from the same pieces the annotations are written with. LuaLS
+/// has no declarations of its own, so methods read like `name(a: T): R`, called with a colon.
+pub const Names = struct {
+    a: std.mem.Allocator,
+    s: Schema,
+    live: types.Live,
+
+    pub fn init(a: std.mem.Allocator, s: Schema) Names {
+        return .{ .a = a, .s = s, .live = .init(s) };
+    }
+
+    fn text(n: *const Names, comptime f: anytype, args: anytype) NamesError![]const u8 {
+        var out: Writer.Allocating = .init(n.a);
+        try @call(.auto, f, .{&out.writer} ++ args);
+        return out.written();
+    }
+
+    fn named(n: *const Names, full: []const u8) NamesError!lang.Decl {
+        return .{ .name = try n.text(Schema.writeFlatName, .{types.leafOf(full)}), .path = try n.text(types.writeTypeName, .{full}) };
+    }
+
+    fn method_(n: *const Names, name: []const u8, path: ?[]const u8, m: *const Schema.Method) NamesError!lang.Decl {
+        const ps = try n.a.alloc(lang.Param, m.signature.params.len);
+        for (m.signature.params, ps) |p, *q| {
+            const pn = try n.text(paramName, .{p.name});
+            const pt = try n.text(paramType, .{ n.s, p });
+            q.* = .{ .name = pn, .type = pt, .text = try std.fmt.allocPrint(n.a, "{s}: {s}", .{ pn, pt }) };
+        }
+        const ok = switch (m.signature.ret) {
+            .result => |r| r.ok.*,
+            else => m.signature.ret,
+        };
+        const ret: ?[]const u8 = if (m.async) "salamander.Promise" else if (lang.isVoid(ok)) null else try n.text(typeRef, .{ n.s, ok, Use.out });
+        const list = try lang.paramList(n.a, ps);
+        return .{
+            .name = name,
+            .path = path,
+            .params = ps,
+            .type = ret,
+            .text = if (ret) |r| try std.fmt.allocPrint(n.a, "{s}({s}): {s}", .{ name, list, r }) else try std.fmt.allocPrint(n.a, "{s}({s})", .{ name, list }),
+        };
+    }
+
+    pub fn typeName(n: *const Names, t: *const Schema.Type) NamesError!?lang.Decl {
+        if (t.kind == .@"opaque") return null;
+        return try n.named(t.name);
+    }
+
+    pub fn traitName(n: *const Names, t: *const Schema.Trait) NamesError!?lang.Decl {
+        return try n.named(t.name);
+    }
+
+    pub fn method(n: *const Names, _: *const Schema.Trait, m: *const Schema.Method) NamesError!?lang.Decl {
+        return try n.method_(m.name, null, m);
+    }
+
+    pub fn field(n: *const Names, t: *const Schema.Type, f: *const Schema.Field) NamesError!?lang.Decl {
+        const is_live = n.live.has(n.s, t);
+        const ty = try n.text(typeRef, .{ n.s, f.type, if (is_live) Use.view else Use.field });
+        return .{ .name = f.name, .type = ty, .text = try std.fmt.allocPrint(n.a, "{s}{s}: {s}", .{ f.name, if (t.kind == .@"union" and !is_live) "?" else "", ty }) };
+    }
+
+    /// An enum's value on its table, an error's name, or a bitfield's member.
+    pub fn member(n: *const Names, t: *const Schema.Type, name: []const u8) NamesError!?lang.Decl {
+        if (t.kind == .@"error") return .{ .name = try std.fmt.allocPrint(n.a, "\"{s}\"", .{name}) };
+        if (t.kind == .@"enum") return .{ .name = name, .path = try std.fmt.allocPrint(n.a, "{s}.{s}", .{ try n.text(types.writeTypeName, .{t.name}), name }) };
+        return .{ .name = name };
+    }
+
+    pub fn function(n: *const Names, in: ?*const Schema.Type, m: *const Schema.Method) NamesError!?lang.Decl {
+        if (in != null) return try n.method_(m.name, null, m);
+        return try n.method_(types.leafOf(m.name), try n.text(types.writeTypeName, .{m.name}), m);
+    }
+
+    pub fn static(n: *const Names, in: ?*const Schema.Type, v: *const Schema.Static) NamesError!?lang.Decl {
+        const name = if (in != null) v.name else types.leafOf(v.name);
+        const ty = try n.text(typeRef, .{ n.s, v.type, Use.view });
+        return .{
+            .name = name,
+            .path = if (in != null) null else try n.text(types.writeTypeName, .{v.name}),
+            .type = ty,
+            .text = try std.fmt.allocPrint(n.a, "{s}: {s}", .{ name, ty }),
+        };
+    }
+};
+
 const testing = std.testing;
 
 /// Fails showing `text` if a piece of `want` isn't in it.
@@ -714,4 +805,19 @@ test "singletons are functions on their namespace, with instance()" {
         "---@type Freecam\nFreecam = {}",
     });
     try testing.expect(std.mem.indexOf(u8, text, "OtherClass") == null);
+}
+
+test "Names give what the typings declare" {
+    const make = struct {
+        fn make(a: std.mem.Allocator, s: Schema) anyerror!Names {
+            return .init(a, s);
+        }
+    }.make;
+    try lang.expectNames(Names, make, .{
+        .method = "count(who: string): integer",
+        .field = "hp: integer",
+        .function = "heal(amount: integer): boolean",
+        .static = "instance: G.Player|nil",
+        .constant = null,
+    });
 }

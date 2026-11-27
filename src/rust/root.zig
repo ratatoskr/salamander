@@ -5,6 +5,7 @@ pub const write = writer.write;
 pub const Options = writer.Options;
 pub const Alias = writer.Alias;
 pub const Error = writer.Error;
+pub const Names = writer.Names;
 /// Like `set_speed` for `setSpeed`, how namespaces name their modules.
 pub const snake = writer.snake;
 

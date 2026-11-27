@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
+const lang = @import("salamander_lang");
 
 const Schema = salamander_schema.Schema;
 const plan = salamander_schema.plan;
@@ -34,8 +35,7 @@ pub fn write(gpa: std.mem.Allocator, s: Schema, w: *std.Io.Writer, options: Opti
     var scratch: Schema.Diagnostic = .{};
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var g: Gen = .{ .s = s, .w = w, .a = arena.allocator(), .o = options, .diag = diagnostic orelse &scratch };
-    if (options.core) g.o.namespace = "";
+    var g: Gen = .init(s, w, arena.allocator(), options, diagnostic orelse &scratch);
     try g.file();
 }
 
@@ -56,17 +56,14 @@ const helper_locals = [_][]const u8{ "sal_this", "sal_out", "sal_t", "sal_f", "s
 /// What a trait object gets besides its methods, skipped when a method has the name.
 const helpers = [_][]const u8{ "from_static", "borrowed", "keep" };
 
-fn contains(list: []const []const u8, n: []const u8) bool {
-    for (list) |o| if (std.mem.eql(u8, o, n)) return true;
-    return false;
-}
-
-const Extra = struct {
-    /// Like a schema name, `Scene.Picker_pick_visit` for an unnamed one, so it goes in its site's module.
-    name: []const u8,
-    ref: Ref,
-    hash: u64 = 0,
-};
+const contains = lang.contains;
+const isVoid = lang.isVoid;
+const resultOk = lang.resultOk;
+pub const snake = lang.snake;
+const screaming = lang.screaming;
+const camel = lang.camel;
+/// Named like `Scene.Picker_pick_visit` for an unnamed one, so it goes in its site's module.
+const Extra = lang.Extra;
 
 const Scope = struct {
     /// Like `scene` or `wraith::slot`.
@@ -87,10 +84,17 @@ const Gen = struct {
     o: Options,
     diag: *Schema.Diagnostic,
     top: std.ArrayList([]const u8) = .empty,
-    fns: std.ArrayList(Extra) = .empty,
+    fns: lang.Fns = .{},
     /// Each module's text, written once the file's done, since a module can only be opened once.
     mods: std.StringArrayHashMapUnmanaged(std.Io.Writer.Allocating) = .empty,
     cur: []const u8 = "",
+    camels: std.StringHashMapUnmanaged(u32) = .empty,
+
+    fn init(s: Schema, w: *std.Io.Writer, a: std.mem.Allocator, options: Options, diag: *Schema.Diagnostic) Gen {
+        var g: Gen = .{ .s = s, .w = w, .a = a, .o = options, .diag = diag };
+        if (options.core) g.o.namespace = "";
+        return g;
+    }
 
     fn out(g: *Gen) Error!*std.Io.Writer {
         const e = try g.mods.getOrPut(g.a, g.cur);
@@ -122,12 +126,7 @@ const Gen = struct {
     }
 
     fn claim(g: *Gen, n: []const u8) Error!void {
-        const full = try g.fmt("{s}::{s}", .{ g.cur, n });
-        if (contains(g.top.items, full)) {
-            g.diag.print("{s}: Rust can't have two things called that", .{full});
-            return error.NameClash;
-        }
-        try g.top.append(g.a, full);
+        try lang.claim(g.a, &g.top, g.diag, try g.fmt("{s}::{s}", .{ g.cur, n }), "Rust");
     }
 
     // Names
@@ -210,13 +209,39 @@ const Gen = struct {
 
     /// A type's name in Rust, like `PlayerRelation`.
     fn typeName(g: *Gen, name: []const u8) Error![]const u8 {
-        return g.ident(try camel(g.a, (try g.scopeOf(name)).leaf));
+        return g.typeLeaf(try g.scopeOf(name));
     }
 
     /// A type from where it's used.
     fn qual(g: *Gen, name: []const u8) Error![]const u8 {
         const sc = try g.scopeOf(name);
-        return g.pathTo(sc.ns, try g.ident(try camel(g.a, sc.leaf)), sc.alias);
+        return g.pathTo(sc.ns, try g.typeLeaf(sc), sc.alias);
+    }
+
+    /// CamelCase, unless another type in its module would be the same. Then one written otherwise keeps how
+    /// it's written, like C's `lua_State` beside `LuaState`.
+    fn typeLeaf(g: *Gen, sc: Scope) Error![]const u8 {
+        const c = try camel(g.a, sc.leaf);
+        if (!std.mem.eql(u8, c, sc.leaf) and (g.camels.get(try g.fmt("{s}::{s}", .{ sc.ns, c })) orelse 0) > 1) return g.ident(sc.leaf);
+        return g.ident(c);
+    }
+
+    /// How many types and traits each module would have by each CamelCase name, for `typeLeaf`.
+    fn countCamels(g: *Gen) Error!void {
+        for (g.s.types) |t| if (!t.nested) try g.countCamel(t.name);
+        for (g.s.traits) |t| try g.countCamel(t.name);
+    }
+
+    fn countCamel(g: *Gen, name: []const u8) Error!void {
+        const sc = try g.scopeOf(name);
+        const e = try g.camels.getOrPut(g.a, try g.fmt("{s}::{s}", .{ sc.ns, try camel(g.a, sc.leaf) }));
+        e.value_ptr.* = if (e.found_existing) e.value_ptr.* + 1 else 1;
+    }
+
+    /// Rust warns about a type name that isn't CamelCase, which `typeLeaf` can give.
+    fn caseAllow(n: []const u8) []const u8 {
+        const camel_case = n.len > 0 and std.ascii.isUpper(n[0]) and std.mem.indexOfScalar(u8, n, '_') == null;
+        return if (camel_case) "" else "#[allow(non_camel_case_types)]\n";
     }
 
     /// Writes into the module `name` goes in, giving its scope.
@@ -229,37 +254,19 @@ const Gen = struct {
     // Function values
 
     fn fnOf(g: *Gen, sig: Schema.Signature) Extra {
-        const h = Schema.signatureHash(sig);
-        for (g.fns.items) |f| if (f.hash == h and f.ref == .func) return f;
-        unreachable;
+        return g.fns.of(sig);
     }
 
     fn sigOf(g: *Gen, f: Extra) Schema.Signature {
-        return switch (f.ref) {
-            .func => |sig| sig.*,
-            .named => |n| g.s.findType(n).?.kind.func,
-            else => unreachable,
-        };
-    }
-
-    fn addFn(g: *Gen, r: Ref, site: []const u8) Error!void {
-        const h = Schema.signatureHash(r.func.*);
-        for (g.fns.items) |f| if (f.hash == h and f.ref == .func) return;
-        try g.fns.append(g.a, .{ .name = site, .ref = r, .hash = h });
+        return lang.sigOf(g.s, f);
     }
 
     fn collect(g: *Gen, r: Ref, site: []const u8) Error!void {
-        switch (r) {
-            .prim, .named => {},
-            .pointer, .slice, .optional => |c| try g.collect(c.*, site),
-            .array => |a| try g.collect(a.child.*, site),
-            .result => |res| try g.collect(res.ok.*, site),
-            .func => |sig| {
-                for (sig.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ site, p.name }));
-                try g.collect(sig.ret, site);
-                try g.addFn(r, site);
-            },
-        }
+        try lang.collect(g, g.a, g.s, r, site);
+    }
+
+    pub fn onFunc(g: *Gen, r: Ref, site: []const u8) Error!void {
+        try g.fns.add(g.a, r, site);
     }
 
     // Types
@@ -358,17 +365,6 @@ const Gen = struct {
         return if (a.cfg.len == 0) "" else g.fmt("{s}#[cfg({s})]\n", .{ indent, a.cfg });
     }
 
-    fn isVoid(r: Ref) bool {
-        return r == .prim and r.prim == .void;
-    }
-
-    fn resultOk(r: Ref) ?Ref {
-        return switch (r) {
-            .result => |res| if (isVoid(res.ok.*)) null else res.ok.*,
-            else => null,
-        };
-    }
-
     /// `(usize, f32, *mut Vec3)`, a table entry's parameters, named if `named`.
     fn entryParams(g: *Gen, m: *const Schema.Method, named: bool) Error![]const u8 {
         var o: std.Io.Writer.Allocating = .init(g.a);
@@ -433,13 +429,83 @@ const Gen = struct {
         return if (std.mem.eql(u8, ret, "()")) "" else ret;
     }
 
-    fn params(g: *Gen, m: *const Schema.Method) Error![]const u8 {
-        var o: std.Io.Writer.Allocating = .init(g.a);
-        for (m.signature.params, 0..) |p, i| {
-            if (i > 0) try o.writer.writeAll(", ");
-            try o.writer.print("{s}: {s}", .{ try g.local(p.name), try g.plain(p.type) });
+    // How each thing's declared, which `Names` gives docs too. Paths are from the module being written.
+
+    /// A method's parameters as plain Rust, `self` and `this` aside.
+    fn paramDecls(g: *Gen, m: *const Schema.Method, plain_: bool) Error![]const lang.Param {
+        const list = try g.a.alloc(lang.Param, m.signature.params.len);
+        for (m.signature.params, list) |p, *q| {
+            const pn = try g.local(p.name);
+            const t = if (plain_) try g.plain(p.type) else try g.decl(p.type);
+            q.* = .{ .name = pn, .type = t, .text = try g.fmt("{s}: {s}", .{ pn, t }) };
         }
-        return o.written();
+        return list;
+    }
+
+    fn params(g: *Gen, m: *const Schema.Method) Error![]const u8 {
+        return lang.paramList(g.a, try g.paramDecls(m, true));
+    }
+
+    /// `&self` or `&mut self`, then the rest.
+    fn selfList(g: *Gen, this: []const u8, ps: []const lang.Param) Error![]const u8 {
+        const rest = try lang.paramList(g.a, ps);
+        if (this.len == 0) return rest;
+        return if (rest.len > 0) g.fmt("{s}, {s}", .{ this, rest }) else this;
+    }
+
+    /// A trait object's method, like `pub fn heal(&self, amount: u32) -> Result<(), E>`.
+    fn methodDecl(g: *Gen, m: *const Schema.Method) Error!lang.Decl {
+        const n = try g.field(m.name);
+        const ret = try g.plainRet(m);
+        const ps = try g.paramDecls(m, true);
+        return .{ .name = n, .params = ps, .type = retText(ret), .text = try g.fmt("pub fn {s}({s}){s}{s}", .{ n, try g.selfList("&self", ps), arrow(ret), retText(ret) }) };
+    }
+
+    fn fieldDecl(g: *Gen, f: Schema.Field) Error!lang.Decl {
+        const n = try g.field(f.name);
+        const t = try g.decl(f.type);
+        return .{ .name = n, .type = t, .text = try g.fmt("pub {s}: {s}", .{ n, t }) };
+    }
+
+    /// Existing code's function, a struct's when `in` is set. Null when it can't be called.
+    fn declaredDecl(g: *Gen, in: ?*const Schema.Type, m: *const Schema.Method) Error!?lang.Decl {
+        if (!callable(m)) return null;
+        const sc = try g.scopeOf(m.name);
+        const n = try g.field(if (in != null) m.name else sc.leaf);
+        const ps = try g.paramDecls(m, false);
+        const ret = if (isVoid(m.signature.ret)) "" else try g.decl(m.signature.ret);
+        return .{
+            .name = n,
+            .path = if (in != null) null else try g.pathTo(sc.ns, n, sc.alias),
+            .params = ps,
+            .type = ret,
+            .text = try g.fmt("pub unsafe fn {s}({s}){s}{s}", .{ n, try g.selfList(if (in != null and !m.static) "&mut self" else "", ps), if (ret.len > 0) " -> " else "", ret }),
+        };
+    }
+
+    /// A static's getter: what a pointer one stores, or where it is.
+    fn staticDecl(g: *Gen, in: ?*const Schema.Type, v: Schema.Static) Error!lang.Decl {
+        const sc = try g.scopeOf(v.name);
+        const n = try g.field(if (in != null) v.name else sc.leaf);
+        const t = try g.decl(v.type);
+        const ret = if (isStored(v)) t else try g.fmt("*mut {s}", .{t});
+        return .{ .name = n, .path = if (in != null) null else try g.pathTo(sc.ns, n, sc.alias), .type = ret, .text = try g.fmt("pub unsafe fn {s}() -> {s}", .{ n, ret }) };
+    }
+
+    fn constantDecl(g: *Gen, k: Schema.Constant) Error!lang.Decl {
+        const sc = try g.scopeOf(k.name);
+        const n = try g.valueName(sc.leaf);
+        const t: []const u8 = switch (k.value) {
+            .bool => "bool",
+            .string => "&str",
+            else => @tagName(k.type.prim),
+        };
+        return .{ .name = n, .path = try g.pathTo(sc.ns, n, sc.alias), .type = t, .text = try g.fmt("pub const {s}: {s}", .{ n, t }) };
+    }
+
+    /// An enum's value, an error or a constant, like `SET_SPEED`.
+    fn valueName(g: *Gen, n: []const u8) Error![]const u8 {
+        return g.ident(try screaming(g.a, n));
     }
 
     // The file
@@ -447,6 +513,7 @@ const Gen = struct {
     fn file(g: *Gen) Error!void {
         const s = g.s;
         g.cur = "";
+        try g.countCamels();
         if (g.o.core) try g.print("#[allow(unused_imports)]\nuse crate::{{Info, Owner}};\n", .{});
         const laid_out = for (s.types) |t| {
             if (t.kind == .@"struct" or t.kind == .@"union") break true;
@@ -456,7 +523,7 @@ const Gen = struct {
         for (s.types) |t| if (t.kind == .func and !g.aliased(t.at)) {
             for (t.kind.func.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ t.name, p.name }));
             try g.collect(t.kind.func.ret, t.name);
-            try g.fns.append(g.a, .{ .name = t.name, .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func) });
+            try g.fns.list.append(g.a, .{ .name = t.name, .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func) });
         };
         for (s.types) |t| if (!g.aliased(t.at)) switch (t.kind) {
             .@"struct", .@"union" => |st| for (st.fields) |f| try g.collect(f.type, try g.fmt("{s}_{s}", .{ t.name, f.name })),
@@ -485,7 +552,7 @@ const Gen = struct {
             .func => {},
         };
         for (s.constants) |k| if (!g.aliased(k.at)) try g.constant(k);
-        for (g.fns.items) |f| {
+        for (g.fns.list.items) |f| {
             const m: Schema.Method = .{ .name = "call", .signature = g.sigOf(f) };
             const ms = [_]*const Schema.Method{&m};
             try g.object(f.name, null, &ms, 0, "fn", &.{Schema.signatureHash(m.signature)});
@@ -542,8 +609,8 @@ const Gen = struct {
         _ = try g.enterFor(t.name);
         const n = try g.typeName(t.name);
         try g.claim(n);
-        try g.print("\n#[repr(transparent)]\n#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]\npub struct {s}(pub {s});\n\nimpl {s} {{\n", .{ n, try g.prim(e.backing), n });
-        for (e.values) |v| try g.print("    pub const {s}: {s} = {s}({d});\n", .{ try g.ident(try screaming(g.a, v.name)), n, n, v.value });
+        try g.print("\n{s}#[repr(transparent)]\n#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]\npub struct {s}(pub {s});\n\nimpl {s} {{\n", .{ caseAllow(n), n, try g.prim(e.backing), n });
+        for (e.values) |v| try g.print("    pub const {s}: {s} = {s}({d});\n", .{ try g.valueName(v.name), n, n, v.value });
         try g.print("}}\n", .{});
     }
 
@@ -552,8 +619,8 @@ const Gen = struct {
         const n = try g.typeName(t.name);
         const sal_ = g.sal();
         try g.claim(n);
-        try g.print("\n// Codes a result can give, with the ones every result can.\n#[repr(transparent)]\n#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]\npub struct {s}(pub u32);\n\nimpl {s} {{\n", .{ n, n });
-        for (e.errors) |x| try g.print("    pub const {s}: {s} = {s}({d});\n", .{ try g.ident(try screaming(g.a, x.name)), n, n, x.code });
+        try g.print("\n// Codes a result can give, with the ones every result can.\n{s}#[repr(transparent)]\n#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]\npub struct {s}(pub u32);\n\nimpl {s} {{\n", .{ caseAllow(n), n, n });
+        for (e.errors) |x| try g.print("    pub const {s}: {s} = {s}({d});\n", .{ try g.valueName(x.name), n, n, x.code });
         try g.print(
             \\    pub const CANCELLED: {s} = {s}({s}::CANCELLED);
             \\    pub const UNSUPPORTED: {s} = {s}({s}::UNSUPPORTED);
@@ -597,7 +664,7 @@ const Gen = struct {
         const n = try g.typeName(t.name);
         const back = try g.prim(b.backing);
         try g.claim(n);
-        try g.print("\n#[repr(transparent)]\n#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]\npub struct {s}(pub {s});\n\n#[allow(clippy::all, unused_unsafe)]\nimpl {s} {{\n", .{ n, back, n });
+        try g.print("\n{s}#[repr(transparent)]\n#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]\npub struct {s}(pub {s});\n\n#[allow(clippy::all, unused_unsafe)]\nimpl {s} {{\n", .{ caseAllow(n), n, back, n });
         var seen: std.ArrayList([]const u8) = .empty;
         for (b.members) |m| {
             const mask = try g.fmt("0x{x}u64", .{(@as(u128, 1) << @intCast(m.bits)) - 1});
@@ -635,26 +702,24 @@ const Gen = struct {
     }
 
     fn constant(g: *Gen, k: Schema.Constant) Error!void {
-        const sc = try g.enterFor(k.name);
-        const n = try g.ident(try screaming(g.a, sc.leaf));
-        try g.claim(n);
+        _ = try g.enterFor(k.name);
+        const d = try g.constantDecl(k);
+        try g.claim(d.name);
         const p = k.type.prim;
-        switch (k.value) {
-            .int => |v| if (p.isFloat())
-                try g.print("pub const {s}: {s} = {d}_{s};\n", .{ n, @tagName(p), v, @tagName(p) })
-            else
-                try g.print("pub const {s}: {s} = {d};\n", .{ n, @tagName(p), v }),
-            .float => |v| try g.print("pub const {s}: {s} = {d}_{s};\n", .{ n, @tagName(p), v, @tagName(p) }),
-            .bool => |v| try g.print("pub const {s}: bool = {};\n", .{ n, v }),
-            .string => |v| try g.print("pub const {s}: &str = \"{s}\";\n", .{ n, v }),
-        }
+        const value = switch (k.value) {
+            .int => |v| if (p.isFloat()) try g.fmt("{d}_{s}", .{ v, @tagName(p) }) else try g.fmt("{d}", .{v}),
+            .float => |v| try g.fmt("{d}_{s}", .{ v, @tagName(p) }),
+            .bool => |v| try g.fmt("{}", .{v}),
+            .string => |v| try g.fmt("\"{s}\"", .{v}),
+        };
+        try g.print("{s} = {s};\n", .{ d.text.?, value });
     }
 
     fn opaqueDef(g: *Gen, t: *const Schema.Type) Error!void {
         _ = try g.enterFor(t.name);
         const n = try g.typeName(t.name);
         try g.claim(n);
-        try g.print("\n// Only ever behind a pointer\n#[repr(C)]\npub struct {s} {{\n    _opaque: [u8; 0],\n}}\n", .{n});
+        try g.print("\n// Only ever behind a pointer\n{s}#[repr(C)]\npub struct {s} {{\n    _opaque: [u8; 0],\n}}\n", .{ caseAllow(n), n });
     }
 
     fn structDef(g: *Gen, t: *const Schema.Type) Error!void {
@@ -663,29 +728,26 @@ const Gen = struct {
         try g.claim(n);
         // Nothing known inside, so it's only ever behind a pointer
         if (t.size == 0) {
-            try g.print("\n#[repr(C)]\npub struct {s} {{\n    _opaque: [u8; 0],\n}}\n", .{n});
+            try g.print("\n{s}#[repr(C)]\npub struct {s} {{\n    _opaque: [u8; 0],\n}}\n", .{ caseAllow(n), n });
             return;
         }
         const is_union = t.kind == .@"union";
-        var packed_ = false;
-        var check: plan.Slots = .init(g.s, t);
-        while (check.next()) |slot| if (slot == .field and slot.field.alignment < slot.field.natural) {
-            packed_ = true;
-        };
-        try g.print("\n#[repr({s})]\n#[derive(Clone, Copy)]\npub {s} {s} {{\n", .{ if (packed_) "C, packed" else "C", if (is_union) "union" else "struct", n });
+        // Rust can't lower one field's alignment, so a struct with any like that is packed with all its padding written out
+        const repr = if (plan.packing(g.s, t)) |p| (if (p == 1) "C, packed" else try g.fmt("C, packed({d})", .{p})) else "C";
+        try g.print("\n{s}#[repr({s})]\n#[derive(Clone, Copy)]\npub {s} {s} {{\n", .{ caseAllow(n), repr, if (is_union) "union" else "struct", n });
         var it: plan.Slots = .init(g.s, t);
         var fields: std.ArrayList(Schema.Field) = .empty;
         var names: std.ArrayList([]const u8) = .empty;
         while (it.next()) |slot| switch (slot) {
             .pad => |p| if (is_union) try g.print("    pub _bytes: [u8; 0x{x}],\n", .{p.len}) else try g.print("    pub _pad_0x{x}: [u8; 0x{x}],\n", .{ p.offset, p.len }),
             .field => |f| {
-                const fname = try g.field(f.field.name);
-                if (contains(names.items, fname)) {
-                    g.diag.print("{s}.{s}: Rust can't have two fields called that", .{ t.name, fname });
+                const d = try g.fieldDecl(f.field);
+                if (contains(names.items, d.name)) {
+                    g.diag.print("{s}.{s}: Rust can't have two fields called that", .{ t.name, d.name });
                     return error.NameClash;
                 }
-                try names.append(g.a, fname);
-                try g.print("    pub {s}: {s},\n", .{ fname, try g.decl(f.field.type) });
+                try names.append(g.a, d.name);
+                try g.print("    {s},\n", .{d.text.?});
                 try fields.append(g.a, f.field);
             },
         };
@@ -702,7 +764,7 @@ const Gen = struct {
             \\const _: () = assert!(::core::mem::size_of::<{s}>() == 0x{x}, "{s}'s size");
             \\
         , .{ n, n, t.size, t.name });
-        if (!packed_) try g.print("const _: () = assert!(::core::mem::align_of::<{s}>() == {d}, \"{s}'s alignment\");\n", .{ n, t.alignment, t.name });
+        if (plan.keepsAlignment(g.s, t)) try g.print("const _: () = assert!(::core::mem::align_of::<{s}>() == {d}, \"{s}'s alignment\");\n", .{ n, t.alignment, t.name });
         if (!is_union) for (fields.items) |f| {
             try g.print("const _: () = assert!(::core::mem::offset_of!({s}, {s}) == 0x{x}, \"{s}.{s}'s offset\");\n", .{ n, try g.field(f.name), f.offset, t.name, f.name });
         };
@@ -713,7 +775,7 @@ const Gen = struct {
     /// Its struct, table, info, methods, `...Impl` trait and the thunks a table made from one calls.
     fn object(g: *Gen, name: []const u8, t: ?*const Schema.Trait, ms: []const *const Schema.Method, hash: u64, label: []const u8, sigs: []const u64) Error!void {
         const sc = try g.enterFor(name);
-        const n = try g.ident(try camel(g.a, sc.leaf));
+        const n = try g.typeLeaf(sc);
         const up = try screaming(g.a, sc.leaf);
         const sal_ = g.sal();
         const is_fn = t == null;
@@ -818,8 +880,8 @@ const Gen = struct {
 
     /// A method calling through the table, entering its owner around the call.
     fn caller(g: *Gen, m: *const Schema.Method) Error!void {
-        const mn = try g.field(m.name);
-        const ret = try g.plainRet(m);
+        const d = try g.methodDecl(m);
+        const mn = d.name;
         const sal_ = g.sal();
         var args: std.Io.Writer.Allocating = .init(g.a);
         if (!m.static) try args.writer.writeAll("self.data");
@@ -827,7 +889,7 @@ const Gen = struct {
             if (args.written().len > 0) try args.writer.writeAll(", ");
             try args.writer.writeAll(try g.lower(p.type, try g.local(p.name)));
         }
-        try g.print("    pub fn {s}(&self{s}{s}){s}{s} {{\n        unsafe {{\n", .{ mn, if (m.signature.params.len > 0) ", " else "", try g.params(m), arrow(ret), retText(ret) });
+        try g.print("    {s} {{\n        unsafe {{\n", .{d.text.?});
         if (!m.async and m.signature.ret == .result) {
             const res = m.signature.ret.result;
             const err = try g.qual(res.err);
@@ -1034,22 +1096,14 @@ const Gen = struct {
         // A top-level one goes in its namespace's module by its last name
         const fname = try g.field(if (in != null) m.name else (try g.scopeOf(m.name)).leaf);
         if (in == null) try g.claim(fname);
-        var ps: std.ArrayList(u8) = .empty;
         var args: std.ArrayList(u8) = .empty;
-        if (has_this) {
-            try ps.appendSlice(g.a, "&mut self");
-            try args.appendSlice(g.a, "self");
-        }
+        if (has_this) try args.appendSlice(g.a, "self");
         for (m.signature.params) |p| {
-            const pn = try g.local(p.name);
-            if (ps.items.len > 0) try ps.appendSlice(g.a, ", ");
             if (args.items.len > 0) try args.appendSlice(g.a, ", ");
-            try ps.appendSlice(g.a, try g.fmt("{s}: {s}", .{ pn, try g.decl(p.type) }));
-            try args.appendSlice(g.a, pn);
+            try args.appendSlice(g.a, try g.local(p.name));
         }
-        const ret = if (isVoid(m.signature.ret)) "" else try g.fmt(" -> {s}", .{try g.decl(m.signature.ret)});
         const sal_ = g.sal();
-        try g.print("\n{s}// {s}, found by name the first time\n{s}#[allow(clippy::all, unused_unsafe)]\n{s}pub unsafe fn {s}({s}){s} {{\n{s}    unsafe {{\n", .{ indent, full, indent, indent, fname, ps.items, ret, indent });
+        try g.print("\n{s}// {s}, found by name the first time\n{s}#[allow(clippy::all, unused_unsafe)]\n{s}{s} {{\n{s}    unsafe {{\n", .{ indent, full, indent, indent, (try g.declaredDecl(in, m)).?.text.?, indent });
         if (m.virtual) |slot| {
             try g.print("{s}        let sal_at = {s}::declared::slot(self as *const Self as *const ::core::ffi::c_void, {d});\n", .{ indent, sal_, slot });
         } else {
@@ -1057,6 +1111,10 @@ const Gen = struct {
         }
         try g.print("{s}        if sal_at == 0 {{\n{s}            {s}::declared::missing({s});\n{s}        }}\n", .{ indent, indent, sal_, name_id, indent });
         try g.print("{s}        let sal_f: {s} = ::core::mem::transmute(sal_at);\n{s}        sal_f({s})\n{s}    }}\n{s}}}\n", .{ indent, fn_id, indent, args.items, indent, indent });
+    }
+
+    fn isStored(v: Schema.Static) bool {
+        return v.type == .pointer or (v.type == .optional and v.type.optional.* == .pointer);
     }
 
     fn declaredStatic(g: *Gen, in: ?*const Schema.Type, v: Schema.Static, wrap: bool) Error!void {
@@ -1068,14 +1126,14 @@ const Gen = struct {
             try g.print("\n// {s}, a {s}\npub const {s}: &str = \"{s}\";\n", .{ full, try g.decl(v.type), name_id, full });
             return;
         }
-        const stored = v.type == .pointer or (v.type == .optional and v.type.optional.* == .pointer);
+        const stored = isStored(v);
         const t = try g.decl(v.type);
         const ret = if (stored) t else try g.fmt("*mut {s}", .{t});
         const indent: []const u8 = if (in != null) "    " else "";
         const fname = try g.field(if (in != null) v.name else (try g.scopeOf(v.name)).leaf);
         if (in == null) try g.claim(fname);
         const sal_ = g.sal();
-        try g.print("\n{s}// {s}, null till it's found\n{s}#[allow(clippy::all, unused_unsafe)]\n{s}pub unsafe fn {s}() -> {s} {{\n{s}    unsafe {{\n{s}        static SAL_SITE: {s}::declared::Site = {s}::declared::Site::new({s});\n{s}        let sal_at = SAL_SITE.get();\n", .{ indent, if (stored) "What's stored there" else "Where it is", indent, indent, fname, ret, indent, indent, sal_, sal_, name_id, indent });
+        try g.print("\n{s}// {s}, null till it's found\n{s}#[allow(clippy::all, unused_unsafe)]\n{s}{s} {{\n{s}    unsafe {{\n{s}        static SAL_SITE: {s}::declared::Site = {s}::declared::Site::new({s});\n{s}        let sal_at = SAL_SITE.get();\n", .{ indent, if (stored) "What's stored there" else "Where it is", indent, indent, (try g.staticDecl(in, v)).text.?, indent, indent, sal_, sal_, name_id, indent });
         if (stored) {
             try g.print("{s}        if sal_at == 0 {{\n{s}            return ::core::ptr::null_mut();\n{s}        }}\n{s}        *(sal_at as *const {s})\n", .{ indent, indent, indent, indent, ret });
         } else try g.print("{s}        sal_at as {s}\n", .{ indent, ret });
@@ -1083,42 +1141,68 @@ const Gen = struct {
     }
 };
 
-/// `setSpeed` and `HTTPServer` as `set_speed` and `http_server`.
-pub fn snake(a: std.mem.Allocator, n: []const u8) error{OutOfMemory}![]const u8 {
-    var o: std.ArrayList(u8) = .empty;
-    for (n, 0..) |c, i| {
-        if (std.ascii.isUpper(c)) {
-            const prev_lower = i > 0 and (std.ascii.isLower(n[i - 1]) or std.ascii.isDigit(n[i - 1]));
-            const next_lower = i > 0 and std.ascii.isUpper(n[i - 1]) and i + 1 < n.len and std.ascii.isLower(n[i + 1]);
-            if ((prev_lower or next_lower) and o.items.len > 0 and o.items[o.items.len - 1] != '_') try o.append(a, '_');
-            try o.append(a, std.ascii.toLower(c));
-        } else try o.append(a, c);
-    }
-    return o.items;
-}
+//// How Rust names and declares each thing, from the same builders the writer uses. `a` should be an arena.
+pub const Names = struct {
+    g: *Gen,
 
-pub fn screaming(a: std.mem.Allocator, n: []const u8) error{OutOfMemory}![]const u8 {
-    const s = try snake(a, n);
-    const o = try a.dupe(u8, s);
-    for (o) |*c| c.* = std.ascii.toUpper(c.*);
-    return o;
-}
-
-/// `List_Scene_NodePtr` and `onLand` as `ListSceneNodePtr` and `OnLand`.
-pub fn camel(a: std.mem.Allocator, n: []const u8) error{OutOfMemory}![]const u8 {
-    var o: std.ArrayList(u8) = .empty;
-    var up = true;
-    for (n) |c| {
-        if (c == '_') {
-            up = true;
-            continue;
-        }
-        try o.append(a, if (up) std.ascii.toUpper(c) else c);
-        up = false;
+    pub fn init(a: std.mem.Allocator, s: Schema, options: Options, diagnostic: ?*Schema.Diagnostic) Error!Names {
+        const g = try a.create(Gen);
+        g.* = .init(s, try lang.sink(a), a, options, diagnostic orelse try a.create(Schema.Diagnostic));
+        try g.file();
+        return .{ .g = g };
     }
-    if (o.items.len == 0) return n;
-    return o.items;
-}
+
+    /// Paths from the crate's top, like `wraith::memory::Region`.
+    fn top(n: *const Names) *Gen {
+        n.g.cur = "";
+        return n.g;
+    }
+
+    fn tidy(n: *const Names, d: lang.Decl) Error!?lang.Decl {
+        return try lang.tidied(n.g.a, d, lang.unrooted);
+    }
+
+    fn named(n: *const Names, full: []const u8) Error!?lang.Decl {
+        const g = n.top();
+        return n.tidy(.{ .name = try g.typeName(full), .path = try g.qual(full) });
+    }
+
+    pub fn typeName(n: *const Names, t: *const Schema.Type) Error!?lang.Decl {
+        return n.named(t.name);
+    }
+
+    pub fn traitName(n: *const Names, t: *const Schema.Trait) Error!?lang.Decl {
+        return n.named(t.name);
+    }
+
+    pub fn method(n: *const Names, _: *const Schema.Trait, m: *const Schema.Method) Error!?lang.Decl {
+        return n.tidy(try n.top().methodDecl(m));
+    }
+
+    pub fn field(n: *const Names, _: *const Schema.Type, f: *const Schema.Field) Error!?lang.Decl {
+        return n.tidy(try n.top().fieldDecl(f.*));
+    }
+
+    /// An enum's value or an error, `Type::NAME`, or a bitfield's getter.
+    pub fn member(n: *const Names, t: *const Schema.Type, name: []const u8) Error!?lang.Decl {
+        const g = n.top();
+        if (t.kind == .bitfield) return .{ .name = try g.fmt("{s}()", .{try g.field(name)}) };
+        const v = try g.valueName(name);
+        return n.tidy(.{ .name = v, .path = try g.fmt("{s}::{s}", .{ try g.qual(t.name), v }) });
+    }
+
+    pub fn function(n: *const Names, in: ?*const Schema.Type, m: *const Schema.Method) Error!?lang.Decl {
+        return n.tidy(try n.top().declaredDecl(in, m) orelse return null);
+    }
+
+    pub fn static(n: *const Names, in: ?*const Schema.Type, v: *const Schema.Static) Error!?lang.Decl {
+        return n.tidy(try n.top().staticDecl(in, v.*));
+    }
+
+    pub fn constant(n: *const Names, c: *const Schema.Constant) Error!?lang.Decl {
+        return n.tidy(try n.top().constantDecl(c.*));
+    }
+};
 
 fn writeFor(source: []const u8, options: Options) ![]const u8 {
     const a = std.testing.allocator;
@@ -1207,4 +1291,44 @@ test "top-level game code in a namespace goes in its module by its last name" {
     const text = try writeFor("namespace Game { [Sig(\"76\")] static u8 seen; [Sig(\"E8\")] i32 entry(u32 a); }", .{});
     defer std.testing.allocator.free(text);
     try expectParts(text, &.{ "pub mod game {\n", "pub unsafe fn seen() -> *mut u8 {", "pub unsafe fn entry(a: u32) -> i32 {", "pub const SEEN_NAME: &str = \"Game.seen\";" });
+}
+
+test "Names give what the writer declares" {
+    const make = struct {
+        fn make(a: std.mem.Allocator, s: Schema) anyerror!Names {
+            return .init(a, s, .{}, null);
+        }
+    }.make;
+    try lang.expectNames(Names, make, .{
+        .method = "pub fn count(&self, who: &str) -> u32",
+        .field = "pub hp: u32",
+        .function = "pub unsafe fn heal(&mut self, amount: u32) -> bool",
+        .static = "pub unsafe fn instance() -> *mut g::Player",
+        .constant = "pub const MAX_PLAYERS: u32",
+    });
+}
+
+test "a type whose CamelCase name another has keeps how it's written" {
+    const text = try writeFor(
+        \\struct lua_State { u32 top; }
+        \\struct LuaState { lua_State* state; }
+    , .{});
+    defer std.testing.allocator.free(text);
+    try expectParts(text, &.{
+        "#[allow(non_camel_case_types)]\n#[repr(C)]\n#[derive(Clone, Copy)]\npub struct lua_State {",
+        "\n#[repr(C)]\n#[derive(Clone, Copy)]\npub struct LuaState {\n    pub state: *mut lua_State,",
+    });
+}
+
+test "a field that can't have its alignment packs the struct only as far as it needs" {
+    const text = try writeFor(
+        \\[Size(0xC)] struct Info { u32 id; [0x4] u64 at; }
+        \\struct Outer { [0x10] Info info; }
+    , .{});
+    defer std.testing.allocator.free(text);
+    try expectParts(text, &.{
+        "#[repr(C, packed(4))]\n#[derive(Clone, Copy)]\npub struct Info {",
+        "align_of::<Info>() == 4",
+        "align_of::<Outer>() == 4",
+    });
 }

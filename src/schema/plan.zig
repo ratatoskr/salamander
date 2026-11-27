@@ -5,6 +5,24 @@ const std = @import("std");
 const Schema = @import("Schema.zig");
 const Ref = Schema.Ref;
 
+/// What C, C++ and Rust pack a struct to when one of its fields can't have its natural alignment, or null when
+/// none needs it. The smallest such field's, so every offset still holds, which is the struct's own unless it's
+/// smaller. Zig lowers just those fields instead.
+pub fn packing(s: Schema, t: *const Schema.Type) ?usize {
+    var n: ?usize = null;
+    var it: Slots = .init(s, t);
+    while (it.next()) |slot| if (slot == .field and slot.field.alignment < slot.field.natural) {
+        n = @min(n orelse slot.field.alignment, slot.field.alignment);
+    };
+    return n;
+}
+
+/// Whether a struct packed to `packing` keeps the alignment the schema gives it.
+pub fn keepsAlignment(s: Schema, t: *const Schema.Type) bool {
+    const n = packing(s, t) orelse return true;
+    return n == t.alignment;
+}
+
 /// Most methods a trait can have, bases included.
 pub const max_methods = 1024;
 

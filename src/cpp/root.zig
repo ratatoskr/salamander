@@ -7,6 +7,7 @@ pub const write = writer.write;
 pub const Options = writer.Options;
 pub const Alias = writer.Alias;
 pub const Error = writer.Error;
+pub const Names = writer.Names;
 
 /// The hand-written base every generated header includes.
 pub const base_header = @embedFile("salamander.hpp");

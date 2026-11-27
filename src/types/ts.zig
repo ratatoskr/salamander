@@ -115,16 +115,13 @@ fn object(w: *Writer, s: Schema, source: []const u8, path: []const u8, depth: us
         .function, .accessor => |m| {
             try methodDoc(w, s, source, m.*, indent);
             try w.writeAll(indent);
-            try propertyName(w, e.leaf);
-            try signature(w, s, m.signature, m.async);
+            try methodText(w, s, e.leaf, m);
             try w.writeAll(";\n");
         },
         .static => |v| {
             try doc(w, source, v.at, indent);
             try w.writeAll(indent);
-            try propertyName(w, e.leaf);
-            try w.writeAll(": ");
-            try typeRef(w, s, v.type, .view);
+            try staticText(w, s, e.leaf, v);
             try w.writeAll(";\n");
         },
         .singleton => |t| try singleton(w, t, indent, ""),
@@ -175,8 +172,8 @@ fn classMembers(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type
         try types.writeTypeName(w, t.name);
         try w.writeAll(" | null;\n");
     }
-    for (st.methods) |m| {
-        try methodDoc(w, s, source, m, indent);
+    for (st.methods) |*m| {
+        try methodDoc(w, s, source, m.*, indent);
         try w.writeAll(indent);
         try propertyName(w, m.name);
         try w.writeByte('(');
@@ -190,12 +187,10 @@ fn classMembers(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Type
         try returns(w, s, m.signature.ret, m.async);
         try w.writeAll(";\n");
     }
-    for (st.statics) |v| {
+    for (st.statics) |*v| {
         try doc(w, source, v.at, indent);
         try w.writeAll(indent);
-        try propertyName(w, v.name);
-        try w.writeAll(": ");
-        try typeRef(w, s, v.type, .view);
+        try staticText(w, s, v.name, v);
         try w.writeAll(";\n");
     }
     if (st.methods.len + st.statics.len == 0) return;
@@ -276,8 +271,8 @@ fn declareType(w: *Writer, s: Schema, source: []const u8, live: *const types.Liv
             const optional = t.kind == .@"union" and !is_live;
             for (st.fields) |f| {
                 try doc(w, source, f.at, inner);
-                try w.print("{s}{s}{s}: ", .{ inner, f.name, if (optional) "?" else "" });
-                try typeRef(w, s, f.type, if (is_live) .view else .field);
+                try w.writeAll(inner);
+                try fieldText(w, s, f, optional, is_live);
                 try w.writeAll(";\n");
             }
             for (st.methods) |m| if (!m.static) try method(w, s, source, m, inner);
@@ -349,9 +344,29 @@ fn trait(w: *Writer, s: Schema, source: []const u8, t: *const Schema.Trait, leaf
 fn method(w: *Writer, s: Schema, source: []const u8, m: Schema.Method, indent: []const u8) Error!void {
     try methodDoc(w, s, source, m, indent);
     try w.writeAll(indent);
-    try propertyName(w, m.name);
-    try signature(w, s, m.signature, m.async);
+    try methodText(w, s, m.name, &m);
     try w.writeAll(";\n");
+}
+
+// How each is declared, which `Names` gives docs too
+
+/// `name(a: T): R`, a method as an object has it.
+fn methodText(w: *Writer, s: Schema, name: []const u8, m: *const Schema.Method) Error!void {
+    try propertyName(w, name);
+    try signature(w, s, m.signature, m.async);
+}
+
+/// `name: T`, a static as a live view.
+fn staticText(w: *Writer, s: Schema, name: []const u8, v: *const Schema.Static) Error!void {
+    try propertyName(w, name);
+    try w.writeAll(": ");
+    try typeRef(w, s, v.type, .view);
+}
+
+/// `name?: T`, a live view's field or a plain one's, optional in a plain union.
+fn fieldText(w: *Writer, s: Schema, f: Schema.Field, optional: bool, live: bool) Error!void {
+    try w.print("{s}{s}: ", .{ f.name, if (optional) "?" else "" });
+    try typeRef(w, s, f.type, if (live) .view else .field);
 }
 
 /// `Name.member`, for looking things up. Long names just don't find anything.
@@ -385,16 +400,20 @@ fn params(w: *Writer, s: Schema, sig: Schema.Signature, use: Use) Error!void {
         if (i > 0) try w.writeAll(", ");
         try paramName(w, p.name);
         try w.writeAll(": ");
-        if (p.inoutType()) |inner| {
-            // Objects are written back, other values go in a box
-            if (types.isRecord(s, inner)) try typeRef(w, s, inner, use) else {
-                try w.writeAll("{ value: ");
-                try typeRef(w, s, inner, use);
-                try w.writeAll(" }");
-            }
-            if (p.nullable()) try w.writeAll(" | null");
-        } else try typeRef(w, s, p.type, use);
+        try paramType(w, s, p, use);
     }
+}
+
+fn paramType(w: *Writer, s: Schema, p: Schema.Param, use: Use) Error!void {
+    if (p.inoutType()) |inner| {
+        // Objects are written back, other values go in a box
+        if (types.isRecord(s, inner)) try typeRef(w, s, inner, use) else {
+            try w.writeAll("{ value: ");
+            try typeRef(w, s, inner, use);
+            try w.writeAll(" }");
+        }
+        if (p.nullable()) try w.writeAll(" | null");
+    } else try typeRef(w, s, p.type, use);
 }
 
 fn returns(w: *Writer, s: Schema, ret: Ref, async: bool) Error!void {
@@ -546,6 +565,96 @@ fn paramName(w: *Writer, name: []const u8) Error!void {
     try w.writeAll(name);
     if (reserved.has(name)) try w.writeByte('_');
 }
+
+// Names
+
+const lang = @import("salamander_lang");
+const NamesError = Writer.Error || error{OutOfMemory};
+
+/// How scripts name and declare each thing, from the same pieces the typings are written with.
+pub const Names = struct {
+    a: std.mem.Allocator,
+    s: Schema,
+    live: types.Live,
+
+    pub fn init(a: std.mem.Allocator, s: Schema) Names {
+        return .{ .a = a, .s = s, .live = .init(s) };
+    }
+
+    /// What `f` writes, on its own.
+    fn text(n: *const Names, comptime f: anytype, args: anytype) NamesError![]const u8 {
+        var out: Writer.Allocating = .init(n.a);
+        try @call(.auto, f, .{&out.writer} ++ args);
+        return out.written();
+    }
+
+    fn named(n: *const Names, full: []const u8) NamesError!lang.Decl {
+        return .{ .name = try n.text(Schema.writeFlatName, .{types.leafOf(full)}), .path = try n.text(types.writeTypeName, .{full}) };
+    }
+
+    /// A method's parameters and what it gives, as an object has it.
+    fn method_(n: *const Names, name: []const u8, path: ?[]const u8, m: *const Schema.Method) NamesError!lang.Decl {
+        const ps = try n.a.alloc(lang.Param, m.signature.params.len);
+        for (m.signature.params, ps) |p, *q| {
+            const pn = try n.text(paramName, .{p.name});
+            const pt = try n.text(paramType, .{ n.s, p, Use.in });
+            q.* = .{ .name = pn, .type = pt, .text = try std.fmt.allocPrint(n.a, "{s}: {s}", .{ pn, pt }) };
+        }
+        return .{
+            .name = try n.text(propertyName, .{name}),
+            .path = path,
+            .params = ps,
+            .type = try n.text(returns, .{ n.s, m.signature.ret, m.async }),
+            .text = try n.text(methodText, .{ n.s, name, m }),
+        };
+    }
+
+    pub fn typeName(n: *const Names, t: *const Schema.Type) NamesError!?lang.Decl {
+        if (t.kind == .@"opaque") return null;
+        return try n.named(t.name);
+    }
+
+    pub fn traitName(n: *const Names, t: *const Schema.Trait) NamesError!?lang.Decl {
+        return try n.named(t.name);
+    }
+
+    pub fn method(n: *const Names, _: *const Schema.Trait, m: *const Schema.Method) NamesError!?lang.Decl {
+        return try n.method_(m.name, null, m);
+    }
+
+    pub fn field(n: *const Names, t: *const Schema.Type, f: *const Schema.Field) NamesError!?lang.Decl {
+        const is_live = n.live.has(n.s, t);
+        const optional = t.kind == .@"union" and !is_live;
+        return .{
+            .name = f.name,
+            .type = try n.text(typeRef, .{ n.s, f.type, if (is_live) Use.view else Use.field }),
+            .text = try n.text(fieldText, .{ n.s, f.*, optional, is_live }),
+        };
+    }
+
+    /// An enum's value on its object, an error's name, or a bitfield's member.
+    pub fn member(n: *const Names, t: *const Schema.Type, name: []const u8) NamesError!?lang.Decl {
+        if (t.kind == .@"error") return .{ .name = try std.fmt.allocPrint(n.a, "\"{s}\"", .{name}) };
+        if (t.kind == .@"enum") return .{ .name = name, .path = try std.fmt.allocPrint(n.a, "{s}.{s}", .{ try n.text(types.writeTypeName, .{t.name}), name }) };
+        return .{ .name = name };
+    }
+
+    /// A struct's method on a view, or a static one on its class, or one in its namespace.
+    pub fn function(n: *const Names, in: ?*const Schema.Type, m: *const Schema.Method) NamesError!?lang.Decl {
+        if (in != null) return try n.method_(m.name, null, m);
+        return try n.method_(types.leafOf(m.name), try n.text(types.writeTypeName, .{m.name}), m);
+    }
+
+    pub fn static(n: *const Names, in: ?*const Schema.Type, v: *const Schema.Static) NamesError!?lang.Decl {
+        const name = if (in != null) v.name else types.leafOf(v.name);
+        return .{
+            .name = name,
+            .path = if (in != null) null else try n.text(types.writeTypeName, .{v.name}),
+            .type = try n.text(typeRef, .{ n.s, v.type, Use.view }),
+            .text = try n.text(staticText, .{ n.s, name, v }),
+        };
+    }
+};
 
 const testing = std.testing;
 
@@ -715,4 +824,19 @@ test "singletons are functions on their namespace, with instance()" {
         "declare const Pad: {\n  /** The one scripts are given. */\n  instance(): Pad;\n};",
     });
     try testing.expect(std.mem.indexOf(u8, text, "declare const Other") == null);
+}
+
+test "Names give what the typings declare" {
+    const make = struct {
+        fn make(a: std.mem.Allocator, s: Schema) anyerror!Names {
+            return .init(a, s);
+        }
+    }.make;
+    try lang.expectNames(Names, make, .{
+        .method = "count(who: string): number",
+        .field = "hp: number",
+        .function = "heal(amount: number): boolean",
+        .static = "instance: G.Player | null",
+        .constant = null,
+    });
 }

@@ -18,18 +18,7 @@ pub fn build(b: *std.Build) void {
     const sys = ctx.addModule("sys", &.{});
     const schema = ctx.addModule("schema", &.{});
     const runtime = ctx.addModule("runtime", &.{});
-    _ = ctx.addModule("zig", &.{
-        .{ .name = "salamander_schema", .module = schema },
-        .{ .name = "salamander_runtime", .module = runtime },
-    });
-    // With the runtime's own core.sal, so tools can write its header too
-    ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
-    ctx.addModule("cpp", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
-    _ = ctx.addModule("rust", &.{.{ .name = "salamander_schema", .module = schema }});
-    // C#, with the runtime's own core.sal so tools can write its C# too
-    ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
-    // Typings for scripts' editors
-    _ = ctx.addModule("types", &.{.{ .name = "salamander_schema", .module = schema }});
+    _ = writers(ctx, true, schema, runtime);
     // The engines, so everything using salamander shares one of each
     const quickjs_c = quickjs.cApi(b, target, optimize);
     const lua_c = lua.cApi(b, target, optimize);
@@ -86,10 +75,7 @@ pub fn build(b: *std.Build) void {
     // Runs while building, so it's built for the host
     const host: Context = .{ .b = b, .target = b.graph.host, .optimize = .ReleaseSafe, .test_step = test_step, .build_test_step = build_test_step, .test_filters = test_filters };
     const host_schema = host.module("schema", &.{});
-    const host_zig = host.module("zig", &.{
-        .{ .name = "salamander_schema", .module = host_schema },
-        .{ .name = "salamander_runtime", .module = host.module("runtime", &.{}) },
-    });
+    const hw = writers(host, false, host_schema, host.module("runtime", &.{}));
     const gen = b.addExecutable(.{
         .name = "salamander-gen",
         .root_module = b.createModule(.{
@@ -98,23 +84,14 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
             .imports = &.{
                 .{ .name = "salamander_schema", .module = host_schema },
-                .{ .name = "salamander_zig", .module = host_zig },
-                .{ .name = "salamander_c", .module = blk: {
-                    const c = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }});
-                    c.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
-                    break :blk c;
-                } },
-                .{ .name = "salamander_cpp", .module = blk: {
-                    const cpp = host.module("cpp", &.{.{ .name = "salamander_schema", .module = host_schema }});
-                    cpp.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
-                    break :blk cpp;
-                } },
-                .{ .name = "salamander_rust", .module = host.module("rust", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
-                .{ .name = "salamander_cs", .module = blk: {
-                    const cs = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }});
-                    cs.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
-                    break :blk cs;
-                } },
+                .{ .name = "salamander_lang", .module = hw.lang },
+                .{ .name = "salamander_zig", .module = hw.zig },
+                .{ .name = "salamander_c", .module = hw.c },
+                .{ .name = "salamander_cpp", .module = hw.cpp },
+                .{ .name = "salamander_rust", .module = hw.rust },
+                .{ .name = "salamander_cs", .module = hw.cs },
+                .{ .name = "salamander_types", .module = hw.types },
+                .{ .name = "salamander_json", .module = hw.json },
             },
         }),
     });
@@ -536,6 +513,63 @@ pub fn bundle(dep: *std.Build.Dependency, folder: std.Build.LazyPath) std.Build.
     return out;
 }
 
+pub const JsonOptions = struct {
+    /// A `.sal` file. Or use `folder`.
+    source: ?std.Build.LazyPath = null,
+    /// A folder of `.sal` files that make one schema, like a `schemas` folder.
+    folder: ?std.Build.LazyPath = null,
+    /// What the file's called.
+    name: []const u8 = "schema.json",
+    /// For layouts. Docs usually want 64-bit's.
+    pointer_size: u8 = 8,
+    /// Tools' namespaces in scope in every file, like `&.{"wraith"}` so they can say `[Sig]`.
+    uses: []const []const u8 = &.{},
+    /// Namespaces every file uses the types of by their short names, like `&.{"Wraith"}`.
+    global_uses: []const []const u8 = &.{},
+    /// Where files that don't say a namespace go, like a plugin's own. Empty is the top.
+    namespace: []const u8 = "",
+    /// Like `freecam/=Freecam`, see `ZigOptions.file_namespaces`.
+    file_namespaces: []const []const u8 = &.{},
+    /// Other folders' `.sal` files, named `name/...`, like a dependency's.
+    with: []const ZigOptions.With = &.{},
+    /// Annotations that stand for a static, like `wraith.Instance=Sig`, see `ZigOptions.instances`.
+    instances: []const []const u8 = &.{},
+    /// C#'s, C++'s and Rust's home for what has no namespace, like their `--namespace`, for how they're spelled.
+    lang_namespace: []const u8 = "",
+    /// C#'s class with the constants.
+    class: []const u8 = "",
+    /// Goes in front of C's names.
+    prefix: []const u8 = "",
+};
+
+/// A schema as JSON with its docs, layouts and each language's spellings, for docs sites and tools, like
+/// `b.addInstallFile(salamander.jsonFile(dep, .{ .folder = b.path("schemas") }), "schema.json");`
+pub fn jsonFile(dep: *std.Build.Dependency, options: JsonOptions) std.Build.LazyPath {
+    const b = dep.builder;
+    const run = b.addRunArtifact(dep.artifact("salamander-gen"));
+    run.addArg("json");
+    const out = run.addOutputFileArg(options.name);
+    if (options.folder) |f| {
+        run.addDirectoryArg(f);
+        trackSal(run, f);
+    } else run.addFileArg(options.source orelse @panic("jsonFile needs a source or a folder"));
+    run.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{options.pointer_size}) });
+    for (options.uses) |u| run.addArgs(&.{ "--use", u });
+    for (options.global_uses) |u| run.addArgs(&.{ "--global-use", u });
+    if (options.namespace.len > 0) run.addArgs(&.{ "--default-namespace", options.namespace });
+    for (options.file_namespaces) |f| run.addArgs(&.{ "--file-namespace", f });
+    for (options.instances) |i| run.addArgs(&.{ "--instance", i });
+    if (options.lang_namespace.len > 0) run.addArgs(&.{ "--namespace", options.lang_namespace });
+    if (options.class.len > 0) run.addArgs(&.{ "--class", options.class });
+    if (options.prefix.len > 0) run.addArgs(&.{ "--prefix", options.prefix });
+    for (options.with) |w| {
+        run.addArgs(&.{ "--with", w.name });
+        run.addDirectoryArg(w.folder);
+        trackSal(run, w.folder);
+    }
+    return out;
+}
+
 /// Each `.sal` is an input too, since a directory argument doesn't rerun when its contents change.
 /// The build script lists the folder, so it reruns when a file's added or removed.
 fn trackSal(run: *std.Build.Step.Run, folder: std.Build.LazyPath) void {
@@ -610,6 +644,54 @@ fn generate(b: *std.Build, gen: *std.Build.Step.Compile, runtime: *std.Build.Mod
         .root_source_file = out,
         .imports = imports.items,
     });
+}
+
+/// The language writers, over what they share in `salamander_lang`.
+const Writers = struct {
+    lang: *std.Build.Module,
+    zig: *std.Build.Module,
+    c: *std.Build.Module,
+    cpp: *std.Build.Module,
+    rust: *std.Build.Module,
+    cs: *std.Build.Module,
+    types: *std.Build.Module,
+    json: *std.Build.Module,
+};
+
+/// Exported and tested for the target, or plain copies for the host's `salamander-gen`.
+fn writers(ctx: Context, exported: bool, schema: *std.Build.Module, runtime: *std.Build.Module) Writers {
+    const add = struct {
+        fn add(c: Context, e: bool, comptime name: []const u8, imports: []const Import) *std.Build.Module {
+            return if (e) c.addModule(name, imports) else c.module(name, imports);
+        }
+    }.add;
+    const lang = add(ctx, exported, "lang", &.{.{ .name = "salamander_schema", .module = schema }});
+    const base: []const Import = &.{ .{ .name = "salamander_schema", .module = schema }, .{ .name = "salamander_lang", .module = lang } };
+    const core = ctx.b.path("src/runtime/core.sal");
+    // C, C++ and C# have the runtime's own core.sal, so tools can write theirs too
+    const c = add(ctx, exported, "c", base);
+    c.addAnonymousImport("core.sal", .{ .root_source_file = core });
+    const cpp = add(ctx, exported, "cpp", base);
+    cpp.addAnonymousImport("core.sal", .{ .root_source_file = core });
+    const cs = add(ctx, exported, "cs", base);
+    cs.addAnonymousImport("core.sal", .{ .root_source_file = core });
+    // Typings for scripts' editors
+    const types = add(ctx, exported, "types", base);
+    return .{
+        .lang = lang,
+        .zig = add(ctx, exported, "zig", with(ctx.b, base, .{ .name = "salamander_runtime", .module = runtime })),
+        .c = c,
+        .cpp = cpp,
+        .rust = add(ctx, exported, "rust", base),
+        .cs = cs,
+        .types = types,
+        // JSON, for docs and tools
+        .json = add(ctx, exported, "json", with(ctx.b, base, .{ .name = "salamander_types", .module = types })),
+    };
+}
+
+fn with(b: *std.Build, base: []const Import, extra: Import) []const Import {
+    return std.mem.concat(b.allocator, Import, &.{ base, &.{extra} }) catch @panic("OOM");
 }
 
 const Context = struct {

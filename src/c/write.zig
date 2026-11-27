@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const salamander_schema = @import("salamander_schema");
+const lang = @import("salamander_lang");
 
 const Schema = salamander_schema.Schema;
 const plan = salamander_schema.plan;
@@ -51,18 +52,8 @@ const keywords = [_][]const u8{
 /// What the helpers call their own locals, so parameters don't.
 const helper_locals = [_][]const u8{ "self", "r", "out" };
 
-fn contains(list: []const []const u8, n: []const u8) bool {
-    for (list) |o| if (std.mem.eql(u8, o, n)) return true;
-    return false;
-}
-
-/// Something C needs its own typedef of.
-const Extra = struct {
-    name: []const u8,
-    ref: Ref,
-    /// A function value's, so the same signature in two places is one type.
-    hash: u64 = 0,
-};
+const contains = lang.contains;
+const Extra = lang.Extra;
 
 const Gen = struct {
     s: Schema,
@@ -73,7 +64,7 @@ const Gen = struct {
     top: std.ArrayList([]const u8) = .empty,
     slices: std.ArrayList(Extra) = .empty,
     opts: std.ArrayList(Extra) = .empty,
-    fns: std.ArrayList(Extra) = .empty,
+    fns: lang.Fns = .{},
 
     fn print(g: *Gen, comptime f: []const u8, args: anytype) Error!void {
         try g.w.print(f, args);
@@ -97,11 +88,7 @@ const Gen = struct {
     }
 
     fn claim(g: *Gen, n: []const u8) Error!void {
-        if (contains(g.top.items, n)) {
-            g.diag.print("{s}: C can't have two things called that", .{n});
-            return error.NameClash;
-        }
-        try g.top.append(g.a, n);
+        try lang.claim(g.a, &g.top, g.diag, n, "C");
     }
 
     /// A parameter's name, kept off C's keywords and the helpers' locals.
@@ -147,44 +134,24 @@ const Gen = struct {
 
     /// An unnamed `fn(...)` is named for where it's first used, like `Freecam_onLand_listener`.
     fn fnName(g: *Gen, sig: Schema.Signature) Error![]const u8 {
-        const h = Schema.signatureHash(sig);
-        for (g.fns.items) |f| if (f.hash == h and f.ref == .func) return f.name;
-        unreachable;
-    }
-
-    fn addFn(g: *Gen, r: Ref, site: []const u8) Error!void {
-        const h = Schema.signatureHash(r.func.*);
-        for (g.fns.items) |f| if (f.hash == h and f.ref == .func) return;
-        try g.fns.append(g.a, .{ .name = try g.name(site), .ref = r, .hash = h });
+        return g.fns.of(sig).name;
     }
 
     /// Finds every slice, value optional and function value, so each gets one typedef.
     fn collect(g: *Gen, r: Ref, site: []const u8) Error!void {
-        switch (r) {
-            .prim, .named => {},
-            .pointer => |c| try g.collect(c.*, site),
-            .array => |a| try g.collect(a.child.*, site),
-            .slice => |c| {
-                try g.collect(c.*, site);
-                try add(g, &g.slices, try g.sliceName(c.*), c.*);
-            },
-            .optional => |c| {
-                try g.collect(c.*, site);
-                // Pointers and objects have their own null
-                if (c.* != .pointer and !g.s.isObject(c.*)) try add(g, &g.opts, try g.optName(c.*), c.*);
-            },
-            .result => |res| try g.collect(res.ok.*, site),
-            .func => |sig| {
-                for (sig.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ site, p.name }));
-                try g.collect(sig.ret, site);
-                try g.addFn(r, site);
-            },
-        }
+        try lang.collect(g, g.a, g.s, r, site);
     }
 
-    fn add(g: *Gen, list: *std.ArrayList(Extra), n: []const u8, r: Ref) Error!void {
-        for (list.items) |e| if (std.mem.eql(u8, e.name, n)) return;
-        try list.append(g.a, .{ .name = n, .ref = r });
+    pub fn onSlice(g: *Gen, child: Ref, _: Ref) Error!void {
+        try lang.addUnique(g.a, &g.slices, .{ .name = try g.sliceName(child), .ref = child });
+    }
+
+    pub fn onOptional(g: *Gen, child: Ref, _: Ref) Error!void {
+        try lang.addUnique(g.a, &g.opts, .{ .name = try g.optName(child), .ref = child });
+    }
+
+    pub fn onFunc(g: *Gen, r: Ref, site: []const u8) Error!void {
+        try g.fns.add(g.a, r, try g.name(site));
     }
 
     // Declarators, inside out like C reads them
@@ -228,24 +195,6 @@ const Gen = struct {
         };
     }
 
-    fn conv(c: Schema.Conv) []const u8 {
-        return switch (c) {
-            .c => "",
-            .cdecl => "SAL_CDECL ",
-            .stdcall => "SAL_STDCALL ",
-            .thiscall => "SAL_THISCALL ",
-            .fastcall => "SAL_FASTCALL ",
-            .winapi => "SAL_WINAPI ",
-        };
-    }
-
-    fn resultOk(r: Ref) ?Ref {
-        return switch (r) {
-            .result => |res| if (res.ok.* == .prim and res.ok.prim == .void) null else res.ok.*,
-            else => null,
-        };
-    }
-
     /// `(uintptr_t, float, Vec3 *)`, the C entry's parameters.
     fn entryParams(g: *Gen, m: *const Schema.Method) Error![]const u8 {
         var out: std.Io.Writer.Allocating = .init(g.a);
@@ -261,7 +210,7 @@ const Gen = struct {
             first = false;
             try w.writeAll(try g.decl(p.type, ""));
         }
-        if (!m.async) if (resultOk(m.signature.ret)) |ok| {
+        if (!m.async) if (lang.resultOk(m.signature.ret)) |ok| {
             if (!first) try w.writeAll(", ");
             first = false;
             try w.writeAll(try g.decl(.{ .pointer = &ok }, ""));
@@ -310,7 +259,7 @@ const Gen = struct {
         for (s.types) |t| if (t.kind == .func and !g.aliased(t.at)) {
             for (t.kind.func.params) |p| try g.collect(p.type, try g.fmt("{s}_{s}", .{ t.name, p.name }));
             try g.collect(t.kind.func.ret, t.name);
-            try g.fns.append(g.a, .{ .name = try g.name(t.name), .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func) });
+            try g.fns.list.append(g.a, .{ .name = try g.name(t.name), .ref = .{ .named = t.name }, .hash = Schema.signatureHash(t.kind.func) });
         };
         for (s.types) |t| if (!g.aliased(t.at)) {
             try g.claim(try g.name(t.name));
@@ -347,14 +296,15 @@ const Gen = struct {
             const n = try g.name(t.name);
             try g.print("typedef struct {s} {s};\ntypedef struct {s}_table {s}_table;\n", .{ n, n, n, n });
         };
-        for (g.fns.items) |f| try g.print("typedef struct {s} {s};\ntypedef struct {s}_table {s}_table;\n", .{ f.name, f.name, f.name, f.name });
+        for (g.fns.list.items) |f| try g.print("typedef struct {s} {s};\ntypedef struct {s}_table {s}_table;\n", .{ f.name, f.name, f.name, f.name });
 
         for (s.types) |*t| if (!g.aliased(t.at)) switch (t.kind) {
             .@"enum" => |e| try g.enumDef(t, e),
-            .bitfield => |b| try g.bitfieldDef(t, b),
             .@"error" => |e| try g.errorDef(t, e),
             else => {},
         };
+        // After the enums, whose types their getters can give
+        for (s.types) |*t| if (!g.aliased(t.at) and t.kind == .bitfield) try g.bitfieldDef(t, t.kind.bitfield);
         if (s.constants.len > 0) try g.print("\n", .{});
         for (s.constants) |k| if (!g.aliased(k.at)) try g.constant(k);
 
@@ -363,14 +313,14 @@ const Gen = struct {
 
         // Objects are two words, and structs can hold them by value
         for (s.traits) |t| if (!g.aliased(t.at)) try g.objectDef(try g.name(t.name));
-        for (g.fns.items) |f| try g.objectDef(f.name);
+        for (g.fns.list.items) |f| try g.objectDef(f.name);
 
         var done: std.ArrayList([]const u8) = .empty;
         for (s.types) |*t| if (!g.aliased(t.at)) try g.structInOrder(t, &done, 0);
 
         for (g.opts.items) |x| try g.print("\n#ifndef SAL_HAVE_{s}\n#define SAL_HAVE_{s}\ntypedef struct {s} {{\n    {s};\n    bool some;\n}} {s};\n#endif\n", .{ x.name, x.name, x.name, try g.decl(x.ref, "value"), x.name });
 
-        for (g.fns.items) |f| {
+        for (g.fns.list.items) |f| {
             const sig = switch (f.ref) {
                 .func => |sig| sig.*,
                 .named => |n| s.findType(n).?.kind.func,
@@ -401,8 +351,16 @@ const Gen = struct {
         const n = try g.name(full);
         try g.claim(try g.fmt("{s}_name", .{n}));
         try g.print("\n/* {s}{s} */\n#define {s}_name \"{s}\"\n", .{ full, if (m.virtual) |slot| try g.fmt(", slot {d} of its vtable", .{slot}) else "", n, full });
-        // Results and promises are Salamander's own, not existing code's
-        if (m.async or m.signature.ret == .result) return;
+        const d = try g.declaredDecl(in, m);
+        const typedef = d.text orelse return;
+        try g.claim(d.name);
+        try g.print("{s};\n", .{typedef});
+    }
+
+    /// `bool (*Player_heal_fn)(Player *self, uint32_t amount)`, its pointer type, named `n_fn`. Null for what
+    /// takes results or is async, which are Salamander's own, not existing code's.
+    fn fnTypedef(g: *Gen, in: ?*const Schema.Type, m: *const Schema.Method, n: []const u8) Error!?[]const u8 {
+        if (m.async or m.signature.ret == .result) return null;
         var params: std.Io.Writer.Allocating = .init(g.a);
         const w = &params.writer;
         var first = true;
@@ -411,15 +369,13 @@ const Gen = struct {
             first = false;
         };
         for (m.signature.params) |p| {
-            if (p.type == .result) return;
+            if (p.type == .result) return null;
             if (!first) try w.writeAll(", ");
             first = false;
             try w.writeAll(try g.decl(p.type, try g.local(p.name)));
         }
         if (first) try w.writeAll("void");
-        const fn_name = try g.fmt("{s}_fn", .{n});
-        try g.claim(fn_name);
-        try g.print("typedef {s};\n", .{try g.decl(m.signature.ret, try g.fmt("({s}*{s})({s})", .{ conv(m.signature.conv), fn_name, params.written() }))});
+        return try g.decl(m.signature.ret, try g.fmt("({s}*{s}_fn)({s})", .{ lang.cConv(m.signature.conv), n, params.written() }));
     }
 
     fn declaredStatic(g: *Gen, full: []const u8, st: Schema.Static) Error!void {
@@ -440,7 +396,7 @@ const Gen = struct {
         const n = try g.name(t.name);
         try g.print("\ntypedef {s} {s};\n", .{ prim(e.backing), n });
         for (e.values) |v| {
-            const vn = try g.fmt("{s}_{s}", .{ n, v.name });
+            const vn = try g.valueName(n, v.name);
             try g.claim(vn);
             try g.intDefine(n, vn, v.value, !e.backing.isSigned());
         }
@@ -450,7 +406,7 @@ const Gen = struct {
         const n = try g.name(t.name);
         try g.print("\n/* Codes a result can give, besides SAL_CANCELLED, SAL_UNSUPPORTED and SAL_GONE. */\ntypedef uint32_t {s};\n", .{n});
         for (e.errors) |x| {
-            const vn = try g.fmt("{s}_{s}", .{ n, x.name });
+            const vn = try g.valueName(n, x.name);
             try g.claim(vn);
             try g.intDefine(n, vn, x.code, true);
         }
@@ -467,7 +423,7 @@ const Gen = struct {
                 .uint => n,
                 .@"enum" => |en| try g.name(en),
             };
-            const get = try g.fmt("{s}_{s}", .{ n, m.name });
+            const get = try g.valueName(n, m.name);
             const with = try g.fmt("{s}_with_{s}", .{ n, m.name });
             try g.claim(get);
             try g.claim(with);
@@ -477,7 +433,7 @@ const Gen = struct {
     }
 
     fn constant(g: *Gen, k: Schema.Constant) Error!void {
-        const n = try g.name(k.name);
+        const n = (try g.constantDecl(k)).name;
         const p = k.type.prim;
         switch (k.value) {
             .int => |v| if (p.isFloat()) try g.print("#define {s} (({s}){d})\n", .{ n, prim(p), v }) else try g.intDefine(prim(p), n, v, !p.isSigned()),
@@ -514,26 +470,23 @@ const Gen = struct {
         const n = try g.name(t.name);
         const is_union = t.kind == .@"union";
         // C can't lower one field's alignment, so a struct with any like that is packed with all its padding written out
-        var packed_ = false;
-        var check: plan.Slots = .init(g.s, t);
-        while (check.next()) |slot| if (slot == .field and slot.field.alignment < slot.field.natural) {
-            packed_ = true;
-        };
-        if (packed_) try g.print("\n#pragma pack(push, 1)", .{});
+        const pack = plan.packing(g.s, t);
+        const packed_ = pack != null;
+        if (pack) |p| try g.print("\n#pragma pack(push, {d})", .{p});
         try g.print("\n{s} {s} {{\n", .{ if (is_union) "union" else "struct", n });
         var it: plan.Slots = .init(g.s, t);
         var fields: std.ArrayList(Schema.Field) = .empty;
         while (it.next()) |slot| switch (slot) {
             .pad => |p| if (is_union) try g.print("    uint8_t _bytes[0x{x}];\n", .{p.len}) else try g.print("    uint8_t _pad_0x{x}[0x{x}];\n", .{ p.offset, p.len }),
             .field => |f| {
-                try g.print("    {s};\n", .{try g.decl(f.field.type, try g.field(f.field.name))});
+                try g.print("    {s};\n", .{(try g.fieldDecl(f.field)).text.?});
                 try fields.append(g.a, f.field);
             },
         };
         try g.print("}};\n", .{});
         if (packed_) try g.print("#pragma pack(pop)\n", .{});
         try g.print("_Static_assert(sizeof({s}) == 0x{x}, \"{s}'s size\");\n", .{ n, t.size, t.name });
-        if (!packed_) try g.print("_Static_assert(_Alignof({s}) == {d}, \"{s}'s alignment\");\n", .{ n, t.alignment, t.name });
+        if (plan.keepsAlignment(g.s, t)) try g.print("_Static_assert(_Alignof({s}) == {d}, \"{s}'s alignment\");\n", .{ n, t.alignment, t.name });
         if (!is_union) for (fields.items) |f| {
             try g.print("_Static_assert(offsetof({s}, {s}) == 0x{x}, \"{s}.{s}'s offset\");\n", .{ n, try g.field(f.name), f.offset, t.name, f.name });
         };
@@ -557,31 +510,79 @@ const Gen = struct {
     fn tableDef(g: *Gen, n: []const u8, ms: []const *const Schema.Method) Error!void {
         try g.print("\n/* A null method is one this table doesn't have. */\nstruct {s}_table {{\n    const sal_Info *salamander_info;\n    sal_Owner *salamander_owner;\n", .{n});
         for (ms) |m| {
-            const inner = try g.fmt("({s}*{s}){s}", .{ conv(m.signature.conv), m.name, try g.entryParams(m) });
+            const inner = try g.fmt("({s}*{s}){s}", .{ lang.cConv(m.signature.conv), m.name, try g.entryParams(m) });
             try g.print("    {s};\n", .{try g.retDecl(m, inner)});
         }
         try g.print("}};\n", .{});
     }
 
     /// `static inline R Trait_method(Trait obj, ...)`, which enters the owner around the call.
-    fn helper(g: *Gen, n: []const u8, helper_name: []const u8, m: *const Schema.Method) Error!void {
-        var params: std.Io.Writer.Allocating = .init(g.a);
-        var args: std.Io.Writer.Allocating = .init(g.a);
-        try params.writer.print("{s} self", .{n});
-        if (!m.static) try args.writer.writeAll("self.data");
+    // How each thing's declared, which `Names` gives docs too
+
+    /// A helper's parameters: the object, the method's, then `out` for a result's value.
+    fn helperParams(g: *Gen, n: []const u8, m: *const Schema.Method) Error![]const lang.Param {
+        var list: std.ArrayList(lang.Param) = .empty;
+        try list.append(g.a, .{ .name = "self", .type = n, .text = try g.fmt("{s} self", .{n}) });
         for (m.signature.params) |p| {
             const pn = try g.local(p.name);
-            try params.writer.print(", {s}", .{try g.decl(p.type, pn)});
-            try args.writer.print("{s}{s}", .{ if (args.written().len > 0) ", " else "", pn });
+            try list.append(g.a, .{ .name = pn, .type = try g.decl(p.type, ""), .text = try g.decl(p.type, pn) });
         }
-        const ok = if (m.async) null else resultOk(m.signature.ret);
-        if (ok) |o| {
-            try params.writer.print(", {s}", .{try g.decl(.{ .pointer = &o }, "out")});
-            try args.writer.print("{s}out", .{if (args.written().len > 0) ", " else ""});
-        }
+        if (!m.async) if (lang.resultOk(m.signature.ret)) |o| try list.append(g.a, .{ .name = "out", .type = try g.decl(.{ .pointer = &o }, ""), .text = try g.decl(.{ .pointer = &o }, "out") });
+        return list.items;
+    }
+
+    /// A trait's helper `hn`, like `uint32_t Game_Player_heal(Game_Player self, uint32_t amount)`, on objects `n`.
+    fn methodDecl(g: *Gen, n: []const u8, hn: []const u8, m: *const Schema.Method) Error!lang.Decl {
+        const ps = try g.helperParams(n, m);
+        return .{
+            .name = hn,
+            .params = ps,
+            .type = std.mem.trimEnd(u8, try g.retDecl(m, ""), " "),
+            .text = try g.retDecl(m, try g.fmt("{s}({s})", .{ hn, try lang.paramList(g.a, ps) })),
+        };
+    }
+
+    fn fieldDecl(g: *Gen, f: Schema.Field) Error!lang.Decl {
+        const n = try g.field(f.name);
+        return .{ .name = n, .type = try g.decl(f.type, ""), .text = try g.decl(f.type, n) };
+    }
+
+    /// Existing code's function as its pointer type, `n_fn`, or only its name in `n_name` when it can't be called.
+    fn declaredDecl(g: *Gen, in: ?*const Schema.Type, m: *const Schema.Method) Error!lang.Decl {
+        const n = try g.name(if (in) |t| try g.fmt("{s}.{s}", .{ t.name, m.name }) else m.name);
+        const typedef = try g.fnTypedef(in, m, n) orelse return .{ .name = try g.fmt("{s}_name", .{n}) };
+        return .{ .name = try g.fmt("{s}_fn", .{n}), .text = try g.fmt("typedef {s}", .{typedef}) };
+    }
+
+    /// Found by its name in `n_name`. What's there is its `type`.
+    fn staticDecl(g: *Gen, full: []const u8, v: Schema.Static) Error!lang.Decl {
+        return .{ .name = try g.fmt("{s}_name", .{try g.name(full)}), .type = try g.decl(v.type, "") };
+    }
+
+    /// A `#define` of its type.
+    fn constantDecl(g: *Gen, k: Schema.Constant) Error!lang.Decl {
+        const t: []const u8 = switch (k.value) {
+            .bool => "bool",
+            .string => "const char *",
+            else => prim(k.type.prim),
+        };
+        const n = try g.name(k.name);
+        return .{ .name = n, .type = t, .text = try g.fmt("{s} {s}", .{ t, n }) };
+    }
+
+    /// An enum's value, an error's code or a bitfield's getter on type `n`.
+    fn valueName(g: *Gen, n: []const u8, member: []const u8) Error![]const u8 {
+        return g.fmt("{s}_{s}", .{ n, member });
+    }
+
+    fn helper(g: *Gen, n: []const u8, helper_name: []const u8, m: *const Schema.Method) Error!void {
+        var args: std.Io.Writer.Allocating = .init(g.a);
+        if (!m.static) try args.writer.writeAll("self.data");
+        for (m.signature.params) |p| try args.writer.print("{s}{s}", .{ if (args.written().len > 0) ", " else "", try g.local(p.name) });
+        if (!m.async and lang.resultOk(m.signature.ret) != null) try args.writer.print("{s}out", .{if (args.written().len > 0) ", " else ""});
         const is_void = !m.async and m.signature.ret == .prim and m.signature.ret.prim == .void;
         const is_result = !m.async and m.signature.ret == .result;
-        try g.print("\nstatic inline {s} {{\n", .{try g.retDecl(m, try g.fmt("{s}({s})", .{ helper_name, params.written() }))});
+        try g.print("\nstatic inline {s} {{\n", .{(try g.methodDecl(n, helper_name, m)).text.?});
         if (is_void) {
             try g.print("    if (!self.table || !self.table->{s} || !sal_enter(self.table->salamander_owner)) return;\n", .{m.name});
             try g.print("    self.table->{s}({s});\n    sal_leave(self.table->salamander_owner);\n}}\n", .{ m.name, args.written() });
@@ -653,6 +654,52 @@ const Gen = struct {
         const call = try g.fmt("{s}_call", .{n});
         try g.claim(call);
         try g.helper(n, call, &m);
+    }
+};
+
+//// How C names and declares each thing, from the same builders the writer uses. `a` should be an arena.
+pub const Names = struct {
+    g: *Gen,
+
+    pub fn init(a: std.mem.Allocator, s: Schema, options: Options, diagnostic: ?*Schema.Diagnostic) Error!Names {
+        const g = try a.create(Gen);
+        g.* = .{ .s = s, .w = try lang.sink(a), .a = a, .o = options, .diag = diagnostic orelse try a.create(Schema.Diagnostic) };
+        try g.file();
+        return .{ .g = g };
+    }
+
+    pub fn typeName(n: *const Names, t: *const Schema.Type) Error!?lang.Decl {
+        return .{ .name = try n.g.name(t.name) };
+    }
+
+    pub fn traitName(n: *const Names, t: *const Schema.Trait) Error!?lang.Decl {
+        return .{ .name = try n.g.name(t.name) };
+    }
+
+    pub fn method(n: *const Names, t: *const Schema.Trait, m: *const Schema.Method) Error!?lang.Decl {
+        const g = n.g;
+        const tn = try g.name(t.name);
+        return try g.methodDecl(tn, try g.fmt("{s}_{s}", .{ tn, m.name }), m);
+    }
+
+    pub fn field(n: *const Names, _: *const Schema.Type, f: *const Schema.Field) Error!?lang.Decl {
+        return try n.g.fieldDecl(f.*);
+    }
+
+    pub fn member(n: *const Names, t: *const Schema.Type, name: []const u8) Error!?lang.Decl {
+        return .{ .name = try n.g.valueName(try n.g.name(t.name), name) };
+    }
+
+    pub fn function(n: *const Names, in: ?*const Schema.Type, m: *const Schema.Method) Error!?lang.Decl {
+        return try n.g.declaredDecl(in, m);
+    }
+
+    pub fn static(n: *const Names, in: ?*const Schema.Type, v: *const Schema.Static) Error!?lang.Decl {
+        return try n.g.staticDecl(if (in) |t| try n.g.fmt("{s}.{s}", .{ t.name, v.name }) else v.name, v.*);
+    }
+
+    pub fn constant(n: *const Names, c: *const Schema.Constant) Error!?lang.Decl {
+        return try n.g.constantDecl(c.*);
     }
 };
 
@@ -738,4 +785,37 @@ test "writes a header" {
         std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });
         return error.TestUnexpectedResult;
     };
+}
+
+test "Names give what the writer declares" {
+    const make = struct {
+        fn make(a: std.mem.Allocator, s: Schema) anyerror!Names {
+            return .init(a, s, .{}, null);
+        }
+    }.make;
+    try lang.expectNames(Names, make, .{
+        .method = "uint32_t G_Counter_count(G_Counter self, sal_string who)",
+        .field = "uint32_t hp",
+        .function = "typedef bool (*G_Player_heal_fn)(G_Player *self, uint32_t amount)",
+        .static = null,
+        .constant = "uint32_t G_max_players",
+    });
+}
+
+test "enums come before the bitfields whose getters give them, and packing goes only as far as it needs" {
+    var parsed = try salamander_schema.parse(std.testing.allocator,
+        \\struct Unit { u32 flags { State state : 4; } }
+        \\enum State : u8 { idle, busy }
+        \\[Size(0xC)] struct Info { u32 id; [0x4] u64 at; }
+    , .{ .pointer_size = 8 }, null);
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try write(std.testing.allocator, parsed.schema, &out.writer, .{}, null);
+    const text = out.written();
+    const state = std.mem.indexOf(u8, text, "typedef uint8_t State;").?;
+    const getter = std.mem.indexOf(u8, text, "static inline State Unit_flags_state(").?;
+    try std.testing.expect(state < getter);
+    try std.testing.expect(std.mem.indexOf(u8, text, "#pragma pack(push, 4)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "_Static_assert(_Alignof(Info) == 4") != null);
 }
