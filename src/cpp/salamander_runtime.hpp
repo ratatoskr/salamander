@@ -4,6 +4,8 @@
 #define SALAMANDER_RUNTIME_HPP
 
 #include <coroutine>
+#include <mutex>
+#include <unordered_set>
 
 #include "salamander_core.hpp"
 
@@ -22,20 +24,39 @@ inline constexpr uintptr_t kept_offset = alignof(std::max_align_t);
 using Destroy = void (*)(uintptr_t data);
 static_assert(sizeof(Destroy) <= kept_offset);
 
+// What keep made, since the owner can guard other objects too, which aren't the host's to destroy
+struct KeptSet {
+    std::mutex lock;
+    std::unordered_set<uintptr_t> data;
+};
+
+inline KeptSet &kept() {
+    static KeptSet k;
+    return k;
+}
+
 inline void destroyKept(uintptr_t data) {
+    {
+        std::lock_guard<std::mutex> g(kept().lock);
+        if (kept().data.erase(data) == 0) return;
+    }
     (*reinterpret_cast<Destroy *>(data - kept_offset))(data);
 }
 
 } // namespace detail
 
-// What a plugin does first, with its host. False if the host had no owner or no memory for it.
-inline bool init(Host host, std::string_view name) {
+// What a plugin does first, with its host and the owner guarding what keep makes, like its loader's.
+// False out of memory.
+inline bool init(Host host, Owner *owner) {
     Runtime::host = host;
-    Runtime::owner = host.owner(name);
-    if (!Runtime::owner) return false;
+    Runtime::owner = owner;
+    if (!owner) return false;
     static auto hook = [](uintptr_t data) { detail::destroyKept(data); };
-    return host.releasable(Runtime::owner, Release::of(hook));
+    return host.releasable(owner, Release::of(hook));
 }
+
+// The same with an owner of its own called name. False if the host had none.
+inline bool init(Host host, std::string_view name) { return init(host, host.owner(name)); }
 
 // A heap copy of impl as a Trait, guarded by Runtime::owner. Destroyed once the host lets go of it,
 // so it's for keep parameters and returns. Needs init.
@@ -49,6 +70,10 @@ Trait keep(T impl) {
         ::operator delete(reinterpret_cast<void *>(data - detail::kept_offset));
     });
     U *u = new (mem + detail::kept_offset) U(std::move(impl));
+    {
+        std::lock_guard<std::mutex> g(detail::kept().lock);
+        detail::kept().data.insert(reinterpret_cast<uintptr_t>(u));
+    }
     Object o = Runtime::host.adopt(Trait::of(*u).object(), Runtime::owner);
     return Trait::from_object(o);
 }
@@ -56,7 +81,7 @@ Trait keep(T impl) {
 // The one provided as name, laid out like this header's Trait. No table if there isn't one.
 template <class Trait>
 Trait get(std::string_view name, uint32_t major, Host host = Runtime::host) {
-    return Trait::from_object(host.get(name, major, const_cast<Info *>(&Trait::info)));
+    return Trait::from_object(host.get(name, major, const_cast<Info *>(&Trait::salamander_info)));
 }
 
 // 0, or 1 when the name's taken, 2 out of memory, 3 when its table has no owner
@@ -82,7 +107,7 @@ void release(Trait obj, Host host = Runtime::host) {
 template <class Base, class Trait>
     requires(Trait::template extends<Base>)
 Base as(Trait obj, Host host = Runtime::host) {
-    return Base::from_object(host.adapt(obj.object(), const_cast<Info *>(&Base::info)));
+    return Base::from_object(host.adapt(obj.object(), const_cast<Info *>(&Base::salamander_info)));
 }
 
 // An object that's ours to let go of, like one from a keep parameter or a return. Released when it goes.

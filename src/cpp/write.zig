@@ -53,10 +53,10 @@ const keywords = [_][]const u8{
 };
 
 /// What generated bodies call their own locals, so parameters don't.
-const helper_locals = [_][]const u8{ "data", "table", "info", "self", "o", "sal_r", "sal_out", "sal_c", "sal_p", "sal_v", "sal_site", "sal_f", "sal_at" };
+const helper_locals = [_][]const u8{ "data", "table", "self", "o", "sal_r", "sal_out", "sal_c", "sal_p", "sal_v", "sal_site", "sal_f", "sal_at" };
 
 /// What every trait object has, so its methods can't be called that.
-const object_members = [_][]const u8{ "data", "table", "Table", "info", "Thunks", "table_of", "of", "from_object", "object", "extends" };
+const object_members = [_][]const u8{ "data", "table", "Table", "Thunks", "table_of", "of", "from_object", "object", "extends" };
 
 fn contains(list: []const []const u8, n: []const u8) bool {
     for (list) |o| if (std.mem.eql(u8, o, n)) return true;
@@ -565,6 +565,7 @@ const Gen = struct {
             const n = try g.enterFor(t.name);
             try g.print("\nstruct {s} {{\n    {s}() = delete;\n", .{ n, n });
             try g.declaredMembers(t, &.{});
+            try g.nestedAliases(t.name, try g.structTaken(t, &.{}));
             try g.print("}};\n", .{});
             return;
         }
@@ -592,7 +593,10 @@ const Gen = struct {
                 try fields.append(g.a, f.field);
             },
         };
-        if (!is_union) try g.declaredMembers(t, fields.items);
+        if (!is_union) {
+            try g.declaredMembers(t, fields.items);
+            try g.nestedAliases(t.name, try g.structTaken(t, fields.items));
+        }
         try g.print("}};\n", .{});
         if (packed_) try g.print("#pragma pack(pop)\n", .{});
         if (counted) try g.print("#ifdef _MSC_VER\n#pragma warning(pop)\n#endif\n", .{});
@@ -614,6 +618,29 @@ const Gen = struct {
             try out.writer.writeAll(if (plain_) try g.plain(p.type, pn) else try g.decl(p.type, pn, true));
         }
         return out.written();
+    }
+
+    /// A struct's member names: its fields, and its game code's.
+    fn structTaken(g: *Gen, t: *const Schema.Type, fields: []const Schema.Field) Error![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (fields) |f| try out.append(g.a, try g.ident(f.name));
+        for (t.kind.@"struct".methods) |m| try out.append(g.a, try g.ident(m.name));
+        for (t.kind.@"struct".statics) |v| try out.append(g.a, try g.ident(v.name));
+        return out.items;
+    }
+
+    /// `using Definition = ::Wraith::Tweaks_Definition;` for what's nested in it, unless a member has the name.
+    fn nestedAliases(g: *Gen, parent: []const u8, taken: []const []const u8) Error!void {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (g.s.types) |t| try names.append(g.a, t.name);
+        for (g.s.traits) |t| try names.append(g.a, t.name);
+        for (names.items) |name| {
+            const end = Schema.namespaceEnd(name) orelse continue;
+            if (end != parent.len or !std.mem.startsWith(u8, name, parent)) continue;
+            const leaf = try g.ident(try Schema.flatName(g.a, name[end + 1 ..]));
+            if (contains(taken, leaf)) continue;
+            try g.print("    using {s} = {s};\n", .{ leaf, try g.qual(name) });
+        }
     }
 
     /// `std::is_same_v<B, ::Transform> || ...` for each base, theirs too.
@@ -645,7 +672,7 @@ const Gen = struct {
             \\    struct Table;
             \\    const Table *table;
             \\
-            \\    static const ::sal::Info info;
+            \\    static const ::sal::Info salamander_info;
             \\    template <class T>
             \\    struct Thunks;
             \\    // A table calling T's methods, null for the ones it doesn't have
@@ -665,13 +692,17 @@ const Gen = struct {
         , .{ n, n, n, try g.basesOf(t) });
         if (t) |tr| {
             var buf: [plan.max_methods]*const Schema.Method = undefined;
+            var taken: std.ArrayList([]const u8) = .empty;
+            try taken.appendSlice(g.a, &object_members);
             for (plan.methods(g.s, tr, &buf)) |m| {
                 if (contains(&object_members, m.name)) {
                     g.diag.print("{s}.{s}: C++ trait objects have their own {s}", .{ tr.name, m.name, m.name });
                     return error.NameClash;
                 }
+                try taken.append(g.a, try g.ident(m.name));
                 try g.print("    {s} {s}({s}) const;\n", .{ try g.plainRet(m), try g.ident(m.name), try g.params(m, true) });
             }
+            try g.nestedAliases(tr.name, taken.items);
         } else {
             const f = for (g.fns.items) |f| {
                 if (std.mem.eql(u8, f.name, name)) break f;
@@ -701,7 +732,7 @@ const Gen = struct {
             for (ms, sigs) |m, sig| try g.print("    {{{{\"{s}\", {d}}}, 0x{x:0>16}ull}},\n", .{ m.name, m.name.len, sig });
             try g.print("}};\n}} // namespace sal_detail\n", .{});
         }
-        try g.print("\ninline const ::sal::Info {s}::info = {{0x{x:0>16}ull, ::sal::abi_version, {{\"{s}\", {d}}}, {s}, {d}}};\n", .{
+        try g.print("\ninline const ::sal::Info {s}::salamander_info = {{0x{x:0>16}ull, ::sal::abi_version, {{\"{s}\", {d}}}, {s}, {d}}};\n", .{
             n,                                                                       hash,   label, label.len,
             if (ms.len > 0) try g.fmt("sal_detail::{s}", .{methods}) else "nullptr", ms.len,
         });
@@ -714,7 +745,7 @@ const Gen = struct {
             \\    using Th = Thunks<T>;
             \\    static constexpr Table t = [] {{
             \\        Table r{{}};
-            \\        r.salamander_info = &info;
+            \\        r.salamander_info = &salamander_info;
             \\
         , .{ n, n });
         for (ms) |m| {
