@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
     });
     _ = ctx.addModule("c", &.{.{ .name = "salamander_schema", .module = schema }});
     _ = ctx.addModule("cpp", &.{.{ .name = "salamander_schema", .module = schema }});
+    _ = ctx.addModule("rust", &.{.{ .name = "salamander_schema", .module = schema }});
     // C#, with the runtime's own core.sal so tools can write its C# too
     ctx.addModule("cs", &.{.{ .name = "salamander_schema", .module = schema }}).addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
     // Typings for scripts' editors
@@ -99,6 +100,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "salamander_zig", .module = host_zig },
                 .{ .name = "salamander_c", .module = host.module("c", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
                 .{ .name = "salamander_cpp", .module = host.module("cpp", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
+                .{ .name = "salamander_rust", .module = host.module("rust", &.{.{ .name = "salamander_schema", .module = host_schema }}) },
                 .{ .name = "salamander_cs", .module = blk: {
                     const cs = host.module("cs", &.{.{ .name = "salamander_schema", .module = host_schema }});
                     cs.addAnonymousImport("core.sal", .{ .root_source_file = b.path("src/runtime/core.sal") });
@@ -120,7 +122,19 @@ pub fn build(b: *std.Build) void {
     const core_update = b.addRunArtifact(gen);
     core_update.addArgs(&.{ "zig", "src/runtime/core.zig", "src/runtime/core.sal", "--runtime", "root.zig" });
     core_update.setCwd(b.path("."));
-    b.step("core", "Write src/runtime/core.zig again from core.sal").dependOn(&core_update.step);
+    const core_step = b.step("core", "Write src/runtime/core.zig and the Rust crate's sal_core.rs again from core.sal");
+    core_step.dependOn(&core_update.step);
+    const rust_core_update = b.addRunArtifact(gen);
+    rust_core_update.addArgs(&.{ "rust", "src/rust/src/sal_core.rs", "src/runtime/core.sal", "--core" });
+    rust_core_update.setCwd(b.path("."));
+    core_step.dependOn(&rust_core_update.step);
+    const rust_core_check = b.addRunArtifact(gen);
+    rust_core_check.addArgs(&.{ "rust", "src/rust/src/sal_core.rs", "src/runtime/core.sal", "--core", "--check" });
+    rust_core_check.setCwd(b.path("."));
+    rust_core_check.addFileInput(b.path("src/runtime/core.sal"));
+    rust_core_check.addFileInput(b.path("src/rust/src/sal_core.rs"));
+    test_step.dependOn(&rust_core_check.step);
+    build_test_step.dependOn(&rust_core_check.step);
     const core_check = b.addRunArtifact(gen);
     core_check.addArgs(&.{ "zig", "src/runtime/core.zig", "src/runtime/core.sal", "--runtime", "root.zig", "--check" });
     core_check.setCwd(b.path("."));
@@ -148,6 +162,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "salamander_runtime", .module = runtime },
             .{ .name = "generated", .module = generated },
             .{ .name = "plain", .module = generate(b, gen, runtime, .{ .source = b.path("src/zig/plain.sal"), .target = target }) },
+            .{ .name = "salamander_sys", .module = sys },
+            // And Rust's, built by cargo into a library the tests load
+            .{ .name = "rust_test", .module = rustProbe(b, gen, target) },
         },
     });
     // And C's view of the same schema has to match both
@@ -155,8 +172,10 @@ pub fn build(b: *std.Build) void {
     agree.addCSourceFile(.{ .file = b.path("src/c/test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     // And C++'s
     agree.addIncludePath(cppHeadersWith(b, gen, base_cpp, .{ .source = b.path("src/schema/test.sal"), .target = target, .name = "test_schema.hpp" }));
-    agree.addCSourceFile(.{ .file = b.path("src/cpp/test.cpp"), .flags = &.{ "-std=c++20", "-Wall", "-Wextra", "-Werror" } });
-    agree.link_libcpp = true;
+    // Zig says -nostdinc++ without its libc++, which MSVC's headers make unused
+    agree.addCSourceFile(.{ .file = b.path("src/cpp/test.cpp"), .flags = &.{ "-std=c++20", "-Wall", "-Wextra", "-Werror", "-Wno-unused-command-line-argument" } });
+    // Zig's libc++ doesn't build for MSVC, whose own C++ library comes with its C one
+    if (target.result.abi == .msvc) agree.linkSystemLibrary("msvcprt", .{}) else agree.link_libcpp = true;
     ctx.addTests("agree", agree);
 }
 
@@ -178,6 +197,79 @@ fn noSignalStackRunner(b: *std.Build) std.Build.Step.Compile.TestRunner {
         \\
     );
     return .{ .path = root, .mode = .server };
+}
+
+/// The Rust the agree tests call, built by cargo from `src/rust/test` with `test.sal`'s Rust. For this machine,
+/// or 32-bit Windows on 64-bit with its target installed (`rustup target add i686-pc-windows-msvc`).
+/// Without cargo or the target, the path's empty and the tests skip. Only looked for in a root build.
+fn rustProbe(b: *std.Build, gen: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const options = b.addOptions();
+    const host = b.graph.host.result;
+    // Cargo's Linux libraries are glibc's, which a static musl test can't load
+    const loads = target.result.os.tag != .linux or target.result.abi.isGnu();
+    const native = target.result.cpu.arch == host.cpu.arch and target.result.os.tag == host.os.tag and loads;
+    const cargo = (if (b.isRoot()) b.findProgram(.{ .names = &.{"cargo"} }) else null) orelse return noRust(options);
+    // Null builds for this machine
+    const triple: ?[]const u8 = if (native) null else if (host.os.tag == .windows and host.cpu.arch == .x86_64 and target.result.os.tag == .windows and target.result.cpu.arch == .x86)
+        "i686-pc-windows-msvc"
+    else
+        return noRust(options);
+    if (triple) |t| if (!hasRustTarget(b, t)) return noRust(options);
+    const schema = b.addRunArtifact(gen);
+    schema.addArg("rust");
+    const schema_rs = schema.addOutputFileArg("schema.rs");
+    schema.addFileArg(b.path("src/schema/test.sal"));
+    schema.addArgs(&.{ "--pointer-size", b.fmt("{d}", .{target.result.ptrBitWidth() / 8}) });
+    // The test crate, with its schema and the salamander crate beside it
+    const manifest =
+        \\[package]
+        \\name = "salamander_test"
+        \\version = "0.0.0"
+        \\edition = "2024"
+        \\publish = false
+        \\
+        \\[lib]
+        \\path = "src/lib.rs"
+        \\crate-type = ["cdylib"]
+        \\
+        \\[dependencies]
+        \\salamander = { path = "salamander" }
+        \\
+    ;
+    const files = b.addWriteFiles();
+    _ = files.add("Cargo.toml", manifest);
+    _ = files.addCopyFile(b.path("src/rust/test/src/lib.rs"), "src/lib.rs");
+    _ = files.addCopyFile(schema_rs, "schema.rs");
+    _ = files.addCopyFile(b.path("src/rust/Cargo.toml"), "salamander/Cargo.toml");
+    _ = files.addCopyDirectory(b.path("src/rust/src"), "salamander/src", .{});
+    const run = b.addSystemCommand(&.{ cargo, "build", "--release", "--quiet", "--manifest-path" });
+    run.addFileArg(files.getDirectory().path(b, "Cargo.toml"));
+    if (triple) |t| run.addArgs(&.{ "--target", t });
+    run.addArg("--target-dir");
+    const out = run.addOutputDirectoryArg("target");
+    run.stdio = .inherit;
+    const name = switch (host.os.tag) {
+        .windows => "salamander_test.dll",
+        .macos => "libsalamander_test.dylib",
+        else => "libsalamander_test.so",
+    };
+    const dir = if (triple) |t| b.fmt("{s}/release", .{t}) else "release";
+    options.addOptionPath("library", out.path(b, b.fmt("{s}/{s}", .{ dir, name })));
+    return options.createModule();
+}
+
+fn noRust(options: *std.Build.Step.Options) *std.Build.Module {
+    options.addOption([]const u8, "library", "");
+    return options.createModule();
+}
+
+/// Whether rustup has the standard library for `triple`.
+fn hasRustTarget(b: *std.Build, triple: []const u8) bool {
+    var code: u8 = 0;
+    const out = b.runAllowFail(&.{ "rustc", "--print", "target-libdir", "--target", triple }, &code, .ignore) catch return false;
+    const dir = std.mem.trim(u8, out, " \r\n");
+    std.Io.Dir.cwd().access(b.graph.io, dir, .{}) catch return false;
+    return true;
 }
 
 /// The C# the clr tests call, built with the dotnet SDK. Without it the paths are empty and the tests skip.

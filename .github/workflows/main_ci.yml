@@ -78,5 +78,10 @@ jobs:
           cache-key: ${{ matrix.platform.target }}-${{ matrix.optimize }}-${{ hashFiles('build.zig.zon') }}
           cache-size-limit: 350
 
+      # The agree tests load a Rust library built with cargo, which the runners have. 32-bit Windows needs its target
+      - name: add 32-bit Rust
+        if: startsWith(matrix.platform.target, 'x86-windows')
+        run: rustup target add i686-pc-windows-msvc
+
       - name: run tests
         run: zig build test -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.platform.target }} --test-timeout 3m --summary all

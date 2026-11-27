@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/github/license/ratatoskr/salamander)](https://github.com/ratatoskr/salamander/blob/main/LICENSE)
 [![Zig](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2Fratatoskr%2Fsalamander%2Fmain%2Fbuild.zig.zon&search=minimum_zig_version%5Cs%2A%3D%5Cs%2A%22%28%5B%5E%22%2B%5D%2B%29&replace=%241&label=zig&color=f7a41d&logo=zig&logoColor=white)](https://github.com/ratatoskr/salamander/blob/main/build.zig.zon)
 
-Typed interfaces between Zig, C, C++, C#, JavaScript and Lua. Write your API once in a `.sal` schema, and plugins, scripts and native code all call each other through it. Rust is being considered next.
+Typed interfaces between Zig, C, C++, Rust, C#, JavaScript and Lua. Write your API once in a `.sal` schema, and plugins, scripts and native code all call each other through it.
 
 Pre-release. Expect breaking changes.
 
@@ -15,6 +15,7 @@ Pre-release. Expect breaking changes.
 - Generates Zig, with plain types and their wire forms, and C headers.
 - Generates C# that's the same JIT'd or compiled with NativeAOT. A raw layer of blittable structs and `delegate* unmanaged` tables, and plain C# over it: namespaces, strings, spans, exceptions for errors, tasks for async methods, delegates for callbacks, and interfaces to implement traits with.
 - Generates C++20 headers, with no exceptions or RTTI needed. Namespaces, `enum class`, and trait objects with methods taking `std::string_view`, `std::span` and `std::optional`. Results come back as `sal::Result`, and async methods as a `sal::Future` to `co_await`, or to give back from a coroutine. Any class implements a trait with the methods it has. Futures and held objects let go when they're done, and a game's declared functions and globals are called through methods on its structs.
+- Generates Rust over the `salamander` crate in `src/rust`. Namespaces are modules, and trait objects have methods taking `&str`, slices and `Option`, giving `Result`s, with async methods giving a `salamander::Future` to `.await`. Any type implements a trait through its `...Impl` trait, closures are function values, and `salamander::spawn` makes an async block an async method.
 - TypeScript and LuaLS typings for scripts' editors.
 - Trait objects that cross DLLs, checked by hash, and stop when their owner goes.
 - JavaScript (QuickJS-ng) and Lua 5.5 scripts call traits and implement them.
@@ -97,10 +98,6 @@ zig build test
 ```
 
 `zig build build-test` builds the test programs into `zig-out/bin` without running them. Pass `-Dtarget=` to build for another platform, like `x86_64-linux-musl`.
-
-The `salamander_clr` tests build a small C# project with C# generated from `src/clr/test.sal`, so they need the .NET 10 SDK on `PATH`, and a .NET 10 runtime for the target's arch. Without them they're skipped.
-
-`src/runtime/core.zig` is generated from `core.sal`. After changing it, run `zig build core`.
 
 Want to help? See [CONTRIBUTING.md](https://github.com/ratatoskr/.github/blob/main/CONTRIBUTING.md). Found a security problem? See [SECURITY.md](https://github.com/ratatoskr/.github/blob/main/SECURITY.md).
 

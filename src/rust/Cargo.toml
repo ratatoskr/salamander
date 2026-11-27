@@ -1,0 +1,11 @@
+[package]
+name = "salamander"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.83"
+description = "Salamander's ABI for Rust: what crosses, and the runtime's own traits. Generated modules use it."
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"

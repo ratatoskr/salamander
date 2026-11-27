@@ -48,9 +48,17 @@ struct Cam {
     }
 };
 
-// An async method as a coroutine
+// An async method as a coroutine, or settled straight away where there are none
 struct Flyer {
+#if SAL_COROUTINES
     sal::Future<Vec3> flyTo(Vec3 v) { co_return Vec3{v.x * 2, v.y, v.z}; }
+#else
+    sal::Future<Vec3> flyTo(Vec3 v) {
+        auto p = sal::promise<Vec3>();
+        p.settle.resolve(Vec3{v.x * 2, v.y, v.z});
+        return std::move(p.future);
+    }
+#endif
 };
 
 static Flyer flyer;
@@ -169,8 +177,14 @@ int cpp_keep(sal::Host host) {
     return (hit ? 1 : 0) + before * 10 + destroyed * 100;
 }
 
+bool cpp_coroutines() { return SAL_COROUTINES; }
+
 // A coroutine waiting on a future that's settled later, then on Zig's, which already is
 uint32_t cpp_coroutine(Freecam zig) {
+#if !SAL_COROUTINES
+    (void)zig;
+    return 0;
+#else
     auto p = sal::promise<uint32_t>();
     auto task = [](sal::Future<uint32_t> f, Freecam z) -> sal::Future<uint32_t> {
         auto r = co_await f;
@@ -183,6 +197,7 @@ uint32_t cpp_coroutine(Freecam zig) {
     p.settle.resolve(20);
     auto r = outer.take();
     return waited + r.value_or(0);
+#endif
 }
 
 // A settle that goes unsettled drops, so its waiter gets Gone

@@ -3,11 +3,18 @@
 #ifndef SALAMANDER_RUNTIME_HPP
 #define SALAMANDER_RUNTIME_HPP
 
-#include <coroutine>
 #include <mutex>
 #include <unordered_set>
 
 #include "salamander_core.hpp"
+
+// co_await and coroutines, which clang doesn't have for 32-bit Windows with MSVC's ABI
+#if defined(__cpp_impl_coroutine)
+#  define SAL_COROUTINES 1
+#  include <coroutine>
+#else
+#  define SAL_COROUTINES 0
+#endif
 
 namespace sal {
 
@@ -231,14 +238,17 @@ public:
     // Gives it up without letting go, like to an async method's caller
     Promise detach() { return std::exchange(p_, Promise{}); }
 
+#if SAL_COROUTINES
     // co_await carrying on in where's thread instead of the settling one
     Awaiter on(Queue where) const & { return Awaiter(this, where); }
     Awaiter operator co_await() const & { return Awaiter(this, Queue{}); }
+#endif
 
 private:
     Promise p_{};
 };
 
+#if SAL_COROUTINES
 template <class T, class E>
 class Future<T, E>::Awaiter {
 public:
@@ -261,6 +271,7 @@ private:
     Queue where_;
     std::coroutine_handle<> h_{};
 };
+#endif
 
 // Settles a Future once, from whoever does the work. Drops it if it goes unsettled, so the waiter gets Gone.
 template <class T, class E = Code>
@@ -355,6 +366,7 @@ struct Returns<void, E> {
 
 } // namespace detail
 
+#if SAL_COROUTINES
 // Runs straight away, up to its first co_await that has to wait. Its future's settled by co_return. Needs init.
 template <class T, class E>
 struct Future<T, E>::promise_type : detail::Returns<T, E> {
@@ -374,6 +386,7 @@ struct Future<T, E>::promise_type : detail::Returns<T, E> {
         this->settle.reject(static_cast<E>(gone));
     }
 };
+#endif
 
 // What an implementation's async method gives back, as what crosses
 inline Promise promise_of(Promise p) { return p; }

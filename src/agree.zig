@@ -256,6 +256,7 @@ const from_cpp = struct {
     extern fn cpp_flyer() gen.Freecam;
     extern fn cpp_as_named(h: rt.Host) u32;
     extern fn cpp_coroutine(zig: gen.Freecam) u32;
+    extern fn cpp_coroutines() bool;
     extern fn cpp_dropped() u32;
     extern fn cpp_held() c_int;
     extern fn cpp_game(locate: *const fn (name: rt.String) callconv(.c) usize) u32;
@@ -345,10 +346,118 @@ test "C++ coroutines, held objects and bases" {
     // Waited, then 20 * 2 and Zig's 1
     var cam: Cam = .{};
     const fc: gen.Freecam = .init(&cam, rt.implement(gen.Freecam, Cam));
-    try testing.expectEqual(1041, from_cpp.cpp_coroutine(fc));
+    // Not for clang on 32-bit Windows with MSVC's ABI, which has no coroutines
+    if (from_cpp.cpp_coroutines()) try testing.expectEqual(1041, from_cpp.cpp_coroutine(fc));
     try testing.expectEqual(rt.gone_code, from_cpp.cpp_dropped());
     try testing.expectEqual(1, from_cpp.cpp_held());
     try testing.expectEqual(1, from_cpp.cpp_as_named(rt.host()));
+}
+
+// Rust's side, in rust/test, built by cargo into a library loaded here. Skipped without cargo
+const from_rust = struct {
+    const library = @import("rust_test").library;
+
+    fn get(comptime T: type, comptime name: [:0]const u8) !T {
+        if (library.len == 0) return error.SkipZigTest;
+        const lib = struct {
+            var handle: ?*anyopaque = null;
+        };
+        if (lib.handle == null) lib.handle = try @import("salamander_sys").library.load(library);
+        return @ptrCast(@import("salamander_sys").library.symbol(lib.handle.?, name) orelse return error.MissingExport);
+    }
+
+    fn call(comptime name: [:0]const u8, comptime T: type, args: anytype) !@typeInfo(@typeInfo(T).pointer.child).@"fn".return_type.? {
+        return @call(.auto, try get(T, name), args);
+    }
+};
+
+fn Fn(comptime params: anytype, comptime R: type) type {
+    var ps: [params.len]type = undefined;
+    for (params, 0..) |p, i| ps[i] = p;
+    return *const @Fn(&ps, &@splat(.{}), R, .{ .@"callconv" = .c });
+}
+
+test "Rust calls through Zig's tables" {
+    var player: gen.Player = std.mem.zeroes(gen.Player);
+    const vt: *const anyopaque = &vtable;
+    @memcpy(std.mem.asBytes(&player)[0..@sizeOf(usize)], std.mem.asBytes(&vt));
+    player.health = 10;
+    player.pos = .{ .x = 1, .y = 2, .z = 3 };
+    const obj: gen.Damageable = .init(&player, gen.impl.@"Damageable for Player"());
+    try testing.expect(!try from_rust.call("rs_damage", Fn(.{ gen.Damageable, f32 }, bool), .{ obj, 4 }));
+    try testing.expectEqual(6, try from_rust.call("rs_health", Fn(.{gen.Damageable}, f32), .{obj}));
+    try testing.expectEqual(gen.Vec3{ .x = 1, .y = 2, .z = 3 }, try from_rust.call("rs_position", Fn(.{gen.Damageable}, gen.Vec3), .{obj}));
+
+    var cam: Cam = .{ .speed = 2 };
+    const fc: gen.Freecam = .init(&cam, rt.implement(gen.Freecam, Cam));
+    const restore = Fn(.{ gen.Freecam, rt.String, *gen.Vec3 }, u32);
+    var v: gen.Vec3 = undefined;
+    try testing.expectEqual(0, try from_rust.call("rs_restore", restore, .{ fc, rt.String.init("x"), &v }));
+    try testing.expectEqual(1, v.x);
+    try testing.expectEqual(@backingInt(gen.LoadErrorCode.NotFound), try from_rust.call("rs_restore", restore, .{ fc, rt.String.init(""), &v }));
+    const load = Fn(.{ gen.Freecam, rt.String, rt.Opt(u32) }, rt.String);
+    try testing.expectEqualStrings("ab", (try from_rust.call("rs_load", load, .{ fc, rt.String.init("abc"), rt.Opt(u32).init(2) })).get());
+    try testing.expectEqualStrings("abc", (try from_rust.call("rs_load", load, .{ fc, rt.String.init("abc"), rt.Opt(u32).init(null) })).get());
+    const fly = Fn(.{ gen.Freecam, f32 }, f32);
+    try testing.expectEqual(5, try from_rust.call("rs_fly", fly, .{ fc, 5 }));
+
+    // No object gives zero, or Gone for a result
+    try testing.expectEqual(0, try from_rust.call("rs_health", Fn(.{gen.Damageable}, f32), .{gen.Damageable{}}));
+    try testing.expectEqual(rt.gone_code, try from_rust.call("rs_restore", restore, .{ gen.Freecam{}, rt.String.init("x"), &v }));
+    try testing.expectEqual(-1, try from_rust.call("rs_fly", fly, .{ gen.Freecam{}, 5 }));
+}
+
+test "Zig calls traits implemented in Rust" {
+    const obj = try from_rust.call("rs_cam", Fn(.{}, gen.Freecam), .{});
+    obj.setSpeed(4);
+    try testing.expectEqual(4, try from_rust.call("rs_cam_speed", Fn(.{}, f32), .{}));
+    try testing.expectEqualStrings("ab", obj.load("xyz", 2));
+    try testing.expectEqualStrings("abc", obj.load("xyz", null));
+    try testing.expectError(error.NotFound, obj.restore(""));
+    try testing.expectEqual(2, (try obj.restore("xy")).y);
+    // Ones it left out give nothing
+    try testing.expectEqual(null, obj.flyTo(.{ .x = 0, .y = 0, .z = 0 }).table);
+
+    // Including a base's
+    const target = try from_rust.call("rs_target", Fn(.{}, gen.Damageable), .{});
+    try testing.expect(!target.damage(4));
+    try testing.expectEqual(6, target.health());
+    try testing.expectEqualStrings("target", target.name());
+    try testing.expectEqual(0, target.position().x);
+    try testing.expect(target.damage(6));
+}
+
+test "Rust reads bitfields like Zig" {
+    var flags: gen.Flags = .{ .alive = true, .level = 0x5a, .job = .mage };
+    const bits: u32 = @bitCast(flags);
+    try testing.expectEqual(0x5a, try from_rust.call("rs_flags_level", Fn(.{u32}, u32), .{bits}));
+    flags.job = .thief;
+    try testing.expectEqual(@as(u32, @bitCast(flags)), try from_rust.call("rs_flags_with_job", Fn(.{ u32, u8 }, u32), .{ bits, @backingInt(gen.Job.thief) }));
+}
+
+test "Rust provides through the host, keeps, awaits and converts to bases" {
+    try testing.expect(try from_rust.call("rs_init", Fn(.{rt.Host}, bool), .{rt.host()}));
+    try testing.expectEqual(0, try from_rust.call("rs_provide", Fn(.{}, u32), .{}));
+    const cam = rt.host().get(gen.Freecam, "rust.cam", 1).?;
+    cam.setSpeed(7);
+    try testing.expectEqual(7, try from_rust.call("rs_cam_speed", Fn(.{}, f32), .{}));
+    try testing.expectEqual(9, try from_rust.call("rs_get_and_set", Fn(.{f32}, f32), .{9}));
+
+    try testing.expectEqual(31, try from_rust.call("rs_visit", Fn(.{u32}, u32), .{3}));
+    try testing.expectEqual(10, try from_rust.call("rs_visit", Fn(.{u32}, u32), .{1}));
+    // Called, not dropped while held, dropped once released, and once more by Held
+    try testing.expectEqual(2101, try from_rust.call("rs_keep", Fn(.{}, i32), .{}));
+    try testing.expectEqual(1, try from_rust.call("rs_as_named", Fn(.{}, u32), .{}));
+
+    // Waited, then 20 * 2 and Zig's 1
+    var zc: Cam = .{};
+    const fc: gen.Freecam = .init(&zc, rt.implement(gen.Freecam, Cam));
+    try testing.expectEqual(1041, try from_rust.call("rs_async", Fn(.{gen.Freecam}, u32), .{fc}));
+    try testing.expectEqual(rt.gone_code, try from_rust.call("rs_dropped", Fn(.{}, u32), .{}));
+    // Settled by an async block in Rust
+    const obj = try from_rust.call("rs_cam", Fn(.{}, gen.Freecam), .{});
+    try testing.expectError(error.Corrupt, obj.find(0).wait());
+    try testing.expectEqual(null, try obj.find(1).wait());
 }
 
 /// What `test.sal`'s game code finds, standing in for a game.
@@ -417,6 +526,11 @@ test "generated Zig calls game code and reads its statics" {
     // And C++ does too, through the same locator
     try testing.expectEqual(0, from_cpp.cpp_game(&FakeGame.locate));
     try testing.expectEqual(5, FakeGame.count);
+    // And Rust, unless there's no cargo
+    if (from_rust.call("rs_game", Fn(.{*const fn (rt.String) callconv(.c) usize}, u32), .{&FakeGame.locate})) |r| {
+        try testing.expectEqual(0, r);
+        try testing.expectEqual(6, FakeGame.count);
+    } else |err| if (err != error.SkipZigTest) return err;
 }
 
 const plain = @import("plain");
