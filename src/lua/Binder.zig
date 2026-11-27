@@ -420,12 +420,18 @@ pub fn unwrap(b: *Binder, l: *State, t: *Trait, idx: c_int) Error!rt.AnyObject {
         .settle => return b.fail(l, "that isn't a {s}", .{t.decl.name}),
     };
     if (lua.typeOf(l, idx) != c.LUA_TTABLE) return b.fail(l, "expected a table for {s}", .{t.decl.name});
+    // One `salamander.implement` named, as the table it holds
+    if (typedFn(l, idx) != null) {
+        _ = c.lua_rawgeti(l, c.lua_absindex(l, idx), 1);
+        defer lua.pop(l, 1);
+        return b.implement(l, t, lua.top(l));
+    }
     return b.implement(l, t, idx);
 }
 
 pub fn unwrapAny(b: *Binder, l: *State, idx: c_int) Error!rt.AnyObject {
     if (lua.isNil(l, idx)) return .{};
-    // A function `salamander.fn` gave a type
+    // A function `salamander.fn` gave a type, or a table `salamander.implement` named one
     if (typedFn(l, idx)) |t| {
         const at = c.lua_absindex(l, idx);
         _ = c.lua_rawgeti(l, at, 1);
@@ -448,6 +454,8 @@ const fn_name = "salamander.fn";
 pub fn pushBuiltin(b: *Binder, l: *State) void {
     const list = [_]struct { []const u8, lua.CFunction }{
         .{ "fn", builtinFnC },
+        .{ "implement", builtinImplementC },
+        .{ "as", builtinAsC },
         .{ "native", builtinNativeC },
         .{ "at", builtinAtC },
         .{ "addressOf", builtinAddressOfC },
@@ -646,6 +654,56 @@ fn builtinFn(b: *Binder, l: *State) Error!c_int {
     c.lua_pushlightuserdata(l, sig.trait);
     c.lua_rawseti(l, -2, 2);
     c.luaL_setmetatable(l, lua.cstr(fn_name));
+    return 1;
+}
+
+fn builtinImplementC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    const b: *Binder = @ptrCast(@alignCast(c.lua_touserdata(l, lua.upvalue(1))));
+    return b.builtinImplement(l) catch |e| b.raise(l, e);
+}
+
+/// `implement(trait, t)` names the trait table `t` implements, by its full name like `Wraith.WorkbenchTab`, or
+/// its own if only one schema has it, so it can be handed over where any object goes.
+fn builtinImplement(b: *Binder, l: *State) Error!c_int {
+    if (lua.typeOf(l, 2) != c.LUA_TTABLE) return b.fail(l, "implement takes a trait's name and a table", .{});
+    const name = lua.toString(l, 1) orelse return b.fail(l, "implement takes a trait's name and a table", .{});
+    const t = b.core.traitNamed(name) catch |e| return switch (e) {
+        error.NoSuchTrait => b.fail(l, "no schema has one trait called {s}", .{name}),
+        else => b.traitFailed(l, e, name),
+    };
+    c.lua_createtable(l, 2, 0);
+    c.lua_pushvalue(l, 2);
+    c.lua_rawseti(l, -2, 1);
+    c.lua_pushlightuserdata(l, t);
+    c.lua_rawseti(l, -2, 2);
+    c.luaL_setmetatable(l, lua.cstr(fn_name));
+    return 1;
+}
+
+fn builtinAsC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    const b: *Binder = @ptrCast(@alignCast(c.lua_touserdata(l, lua.upvalue(1))));
+    return b.builtinAs(l) catch |e| b.raise(l, e);
+}
+
+/// `as(trait, obj)` is any object as the trait it is, by its full name or its own, so its methods can be
+/// called, like what a slot of the plugin's own holds.
+fn builtinAs(b: *Binder, l: *State) Error!c_int {
+    const name = lua.toString(l, 1) orelse return b.fail(l, "as takes a trait's name and an object", .{});
+    const t = b.core.traitNamed(name) catch |e| return switch (e) {
+        error.NoSuchTrait => b.fail(l, "no schema has one trait called {s}", .{name}),
+        else => b.traitFailed(l, e, name),
+    };
+    const obj = try b.unwrapAny(l, 2);
+    if (obj.table == null) {
+        c.lua_pushnil(l);
+        return 1;
+    }
+    // Another version, or another schema's copy of it, else not one
+    const fitted = b.core.host.raw().adapt(obj, @ptrCast(@constCast(t.bound.info)));
+    if (fitted.table == null) return b.fail(l, "that isn't a {s}", .{t.decl.name});
+    try b.wrap(l, t, fitted);
     return 1;
 }
 

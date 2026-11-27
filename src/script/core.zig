@@ -281,6 +281,29 @@ pub fn Core(comptime L: type) type {
             return self.traitOf(s, s.findTrait(name) orelse return error.NoSuchTrait);
         }
 
+        /// A trait any loaded schema declares, by its full name like `Wraith.WorkbenchTab`, or by its
+        /// own if only one has it, like `WorkbenchTab`.
+        pub fn traitNamed(self: *Self, name: []const u8) TraitError!*Trait {
+            for (self.modules.items) |m| {
+                if (m.signature or m.replaced) continue;
+                const s = m.schema();
+                if (s.findTrait(name)) |t| return self.traitOf(s, t);
+            }
+            var found: ?struct { Schema, *const Schema.Trait } = null;
+            for (self.modules.items) |m| {
+                if (m.signature or m.replaced) continue;
+                const s = m.schema();
+                for (s.traits) |*t| {
+                    if (t.name.len <= name.len or t.name[t.name.len - name.len - 1] != '.' or !std.mem.endsWith(u8, t.name, name)) continue;
+                    // The same trait from another schema's copy is still one
+                    if (found) |f| if (!std.mem.eql(u8, f[1].name, t.name)) return error.NoSuchTrait;
+                    found = .{ s, t };
+                }
+            }
+            const f = found orelse return error.NoSuchTrait;
+            return self.traitOf(f[0], f[1]);
+        }
+
         // Existing code that loaded schemas declare, as scripts' `schema` module
 
         pub const Declared = union(enum) {

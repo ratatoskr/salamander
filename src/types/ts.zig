@@ -216,6 +216,10 @@ pub fn builtins(w: *Writer) Error!void {
         \\  export function native<F extends (...args: any[]) => any>(signature: F, address: number | bigint): F;
         \\  /** The native function at `address`, callable, typed by `signature` like `fn` takes. */
         \\  export function native(signature: string, address: number | bigint): (...args: any[]) => any;
+        \\  /** `obj`, named as implementing the trait by its full name like `"Wraith.WorkbenchTab"` or its own if only one schema has it, so it can be handed over where any object goes. */
+        \\  export function implement<T extends object>(trait: string, obj: T): T;
+        \\  /** Any object, like one a plugin's slot holds, as the trait it is, by name like `implement` takes, so its methods can be called. */
+        \\  export function as<T = any>(trait: string, obj: unknown): T;
         \\  /** The full name of a declared function, like `"Kai.Player.heal"`, or undefined for anything else. */
         \\  export function nameOf(f: unknown): string | undefined;
         \\  /** A function's parameter names, as written. One that isn't a plain name, like `{ a }`, is `""`. */

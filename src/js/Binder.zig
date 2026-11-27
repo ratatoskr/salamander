@@ -44,7 +44,7 @@ copy_class: c.JSClassID = 0,
 copy_atom: c.JSAtom = 0,
 /// Where a JS value keeps the native object kept for it.
 cache: c.JSAtom,
-/// On functions `salamander.fn` typed, holding their signature's trait.
+/// On functions `salamander.fn` typed and objects `salamander.implement` named, holding their trait.
 fn_tag: c.JSAtom,
 /// On declared functions, holding their full name for `nameOf`.
 declared_tag: c.JSAtom,
@@ -297,8 +297,8 @@ pub fn unwrap(b: *Binder, t: *Trait, v: Value) convert.Error!rt.AnyObject {
 
 pub fn unwrapAny(b: *Binder, v: Value) convert.Error!rt.AnyObject {
     if (qjs.isNullish(v)) return .{};
-    // A function `salamander.fn` gave a type
-    if (c.JS_IsFunction(b.ctx, v)) {
+    // A function `salamander.fn` gave a type, or an object `salamander.implement` named one
+    if (c.JS_IsObject(v)) {
         const tag = c.JS_GetProperty(b.ctx, v, b.fn_tag);
         defer c.JS_FreeValue(b.ctx, tag);
         if (c.JS_IsNumber(tag)) {
@@ -323,7 +323,7 @@ pub fn unwrapFn(b: *Binder, t: *Trait, v: Value) convert.Error!rt.AnyObject {
 // The `salamander` module scripts import, for types they write while running
 
 pub const builtin_module = "salamander";
-pub const builtin_exports = [_][:0]const u8{ "fn", "native", "at", "addressOf", "typeOf", "sizeOf", "snapshot", "save", "edit", "load", "nameOf", "params" };
+pub const builtin_exports = [_][:0]const u8{ "fn", "implement", "as", "native", "at", "addressOf", "typeOf", "sizeOf", "snapshot", "save", "edit", "load", "nameOf", "params" };
 
 /// One of `builtin_exports`, as a function.
 pub fn builtin(b: *Binder, name: []const u8) Value {
@@ -331,6 +331,8 @@ pub fn builtin(b: *Binder, name: []const u8) Value {
     const Builtin = @TypeOf(&builtinFn);
     const table = [_]struct { []const u8, Builtin }{
         .{ "fn", &builtinFn },
+        .{ "implement", &builtinImplement },
+        .{ "as", &builtinAs },
         .{ "native", &builtinNative },
         .{ "at", &builtinAt },
         .{ "addressOf", &builtinAddressOf },
@@ -500,6 +502,42 @@ fn builtinFn(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_i
     const sig = b.signatureArg(argv[0]) catch |e| return failed(ctx, e);
     if (c.JS_SetProperty(ctx, argv[1], b.fn_tag, c.JS_NewInt64(ctx, @bitCast(@as(u64, @intFromPtr(sig.trait))))) < 0) return qjs.exception;
     return c.JS_DupValue(ctx, argv[1]);
+}
+
+/// `implement(trait, obj)` names the trait `obj` implements, by its full name like `Wraith.WorkbenchTab`, or its
+/// own if only one schema has it, so it can be handed over where any object goes.
+fn builtinImplement(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    const b = binderData(ctx, data[0]);
+    if (argc < 2 or !c.JS_IsObject(argv[1])) return qjs.throw(ctx, "implement takes a trait's name and an object", .{});
+    const name = qjs.toString(ctx, argv[0]) orelse return qjs.exception;
+    defer name.free();
+    const t = b.core.traitNamed(name.slice()) catch |e| return switch (e) {
+        error.NoSuchTrait => qjs.throw(ctx, "no schema has one trait called {s}", .{name.slice()}),
+        else => failed(ctx, b.traitFailed(e, name.slice())),
+    };
+    if (c.JS_SetProperty(ctx, argv[1], b.fn_tag, c.JS_NewInt64(ctx, @bitCast(@as(u64, @intFromPtr(t))))) < 0) return qjs.exception;
+    return c.JS_DupValue(ctx, argv[1]);
+}
+
+/// `as(trait, obj)` is any object as the trait it is, by its full name or its own, so its methods can be
+/// called, like what a slot of the plugin's own holds.
+fn builtinAs(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, data: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    const b = binderData(ctx, data[0]);
+    if (argc < 2) return qjs.throw(ctx, "as takes a trait's name and an object", .{});
+    const name = qjs.toString(ctx, argv[0]) orelse return qjs.exception;
+    defer name.free();
+    const t = b.core.traitNamed(name.slice()) catch |e| return switch (e) {
+        error.NoSuchTrait => qjs.throw(ctx, "no schema has one trait called {s}", .{name.slice()}),
+        else => failed(ctx, b.traitFailed(e, name.slice())),
+    };
+    const obj = b.unwrapAny(argv[1]) catch |e| return failed(ctx, e);
+    if (obj.table == null) return qjs.null_value;
+    // Another version, or another schema's copy of it, else not one
+    const fitted = b.core.host.raw().adapt(obj, @ptrCast(@constCast(t.bound.info)));
+    if (fitted.table == null) return qjs.throw(ctx, "that isn't a {s}", .{t.decl.name});
+    return b.wrap(t, fitted) catch |e| failed(ctx, e);
 }
 
 /// The full name of a declared function, like `Kai.Player.heal`, or undefined. Caller frees it.

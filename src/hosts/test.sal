@@ -19,10 +19,19 @@ trait Greeter {
     u32 sum([]u8 bytes);
     // Calls f, a fn value made from `fn i32 (i32 a, i32 b)`
     i32 apply(object f, i32 a, i32 b);
+    // t's tally twice, any object that's a Tally
+    u32 tallyTwice(object t);
+    // A Tally counting from 100, as any object
+    object tallyObject();
     // C text, and a count to add 1 to if there is one
     static cstring echo(cstring text, inout ?i32 seen);
     // Settles once the test says, with n + 1
     async u32 soon(u32 n);
+}
+
+// Something counting, which scripts hand over as any object
+trait Tally {
+    u32 tally();
 }
 
 // What a host gives each script, with its objects through `greeter()` and `Greeter.instance()`

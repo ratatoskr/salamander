@@ -1101,9 +1101,34 @@ const Gen = struct {
         for (ms) |m| {
             // Only its own, its bases' interfaces have theirs. Static ones have no this to find it with.
             if (m.static or !g.ownMethod(m, bases)) continue;
-            try g.print("    {s} {s}({s});\n", .{ try g.retType(m), try g.ident(m.name), (try g.params(m)).decl });
+            const ret = try g.retType(m);
+            // Left out, it's what a table without it gives
+            const body = if (std.mem.eql(u8, ret, "void")) " { }" else " => default!;";
+            try g.print("    {s} {s}({s}){s}\n", .{ ret, try g.ident(m.name), (try g.params(m)).decl, body });
         }
         try g.print("}}\n", .{});
+    }
+
+    /// A plain interface method's body for when an implementation leaves it out, like a table without it:
+    /// nothing, zero, an empty string, or a new one of a class that converts.
+    fn plainDefault(g: *Gen, m: *const Schema.Method, ret: []const u8) Error![]const u8 {
+        const task = "global::System.Threading.Tasks.Task";
+        if (std.mem.eql(u8, ret, "void")) return " { }";
+        if (std.mem.eql(u8, ret, task)) return " => " ++ task ++ ".CompletedTask;";
+        if (std.mem.startsWith(u8, ret, task ++ "<")) {
+            const inner = ret[task.len + 1 .. ret.len - 1];
+            return g.fmt(" => {s}.FromResult<{s}>({s});", .{ task, inner, g.zeroOf(m, inner) });
+        }
+        return g.fmt(" => {s};", .{g.zeroOf(m, ret)});
+    }
+
+    fn zeroOf(g: *Gen, m: *const Schema.Method, t: []const u8) []const u8 {
+        if (std.mem.eql(u8, t, "string")) return "\"\"";
+        if (std.mem.endsWith(u8, t, "?")) return "null";
+        const ok = lang.resultOk(m.signature.ret) orelse m.signature.ret;
+        if (ok == .named and g.kindOf(ok.named) == .twin) return "new()";
+        // Null for a trait or class, which is what a missing method gives too
+        return "default!";
     }
 
     fn ownMethod(g: *Gen, m: *const Schema.Method, bases: []const []const u8) bool {
@@ -1481,7 +1506,8 @@ const Gen = struct {
         try g.print("\n{{\n", .{});
         for (ms) |m| {
             if (m.static or !g.ownMethod(m, t.bases)) continue;
-            try g.print("    {s};\n", .{(try g.methodDecl(m, "")).text.?});
+            const d = try g.methodDecl(m, "");
+            try g.print("    {s}{s}\n", .{ d.text.?, try g.plainDefault(m, d.type.?) });
         }
         try g.print("}}\n", .{});
     }
@@ -1730,8 +1756,9 @@ test "writes C#" {
         "    public void Bump(ref global::Game.Vec3 v)",
         "    public void Each(global::Game.MoverEachVisit? visit)",
         "public unsafe delegate bool MoverEachVisit(uint n);",
-        "public unsafe interface IMover\n{\n    global::Game.Vec3 Move(global::Game.Vec3 by, string @int);",
-        "    global::System.Threading.Tasks.Task<string> FetchAsync(string url, global::System.Threading.CancellationToken cancel);",
+        // What an implementation leaves out gives what a missing method does
+        "public unsafe interface IMover\n{\n    global::Game.Vec3 Move(global::Game.Vec3 by, string @int) => default!;",
+        "    global::System.Threading.Tasks.Task<string> FetchAsync(string url, global::System.Threading.CancellationToken cancel) => global::System.Threading.Tasks.Task.FromResult<string>(\"\");",
     };
     for (want) |part| if (std.mem.indexOf(u8, text, part) == null) {
         std.debug.print("missing:\n{s}\n\nin:\n{s}\n", .{ part, text });

@@ -61,6 +61,13 @@ const Hello = struct {
         const call: *const fn (usize, i32, i32) callconv(.c) i32 = @ptrFromInt(entries[2]);
         return call(f.data, a, b);
     }
+    pub fn tallyObject(_: *Hello) rt.AnyObject {
+        return .of(rt.Object(B.Tally).init(&hundred, rt.implement(B.Tally, Hundred)));
+    }
+    pub fn tallyTwice(_: *Hello, t: rt.AnyObject) u32 {
+        const tally = rt.host().adapt(B.Tally, t);
+        return tally.tally() + tally.tally();
+    }
     pub fn sum(_: *Hello, bytes: []const u8) u32 {
         var n: u32 = 0;
         for (bytes) |x| n += x;
@@ -370,6 +377,15 @@ test "blobs go both ways without copying, and every count's let go" {
     }
 }
 
+const Hundred = struct {
+    n: u32 = 100,
+    pub fn tally(self: *Hundred) u32 {
+        self.n += 1;
+        return self.n;
+    }
+};
+var hundred: Hundred = .{};
+
 fn addNative(a: i32, b: i32) callconv(.c) i32 {
     return a + b;
 }
@@ -416,6 +432,46 @@ test "scripts type functions and call native ones from signatures they write" {
 
 fn addSelf(self: usize, b: i32) callconv(.c) i32 {
     return @as(i32, @intCast(self)) + b;
+}
+
+test "scripts name the trait a script object implements, to hand it over as any object" {
+    const js =
+        \\import { greeter } from "app";
+        \\import { implement, as } from "salamander";
+        \\let n = 0;
+        \\const tally = implement("Tally", { tally() { return ++n; } });
+        \\let bad = "";
+        \\try { implement("Nope", {}); } catch (e) { bad = e.message; }
+        \\const viewed = as("Tally", greeter.tallyObject());
+        \\globalThis.out = greeter.tallyTwice(tally) + " " + greeter.tallyTwice(implement("Tally", tally)) + " " + bad.includes("Nope") + " " + (viewed.tally() > 100);
+    ;
+    const lua_source =
+        \\local app = require("app")
+        \\local sal = require("salamander")
+        \\local n = 0
+        \\local tally = sal.implement("Tally", { tally = function(self) n = n + 1 return n end })
+        \\local ok, err = pcall(sal.implement, "Nope", {})
+        \\local viewed = sal.as("Tally", app.greeter:tallyObject())
+        \\out = app.greeter:tallyTwice(tally) .. " " .. tostring(string.find(tostring(err), "Nope") ~= nil) .. " " .. tostring(viewed:tally() > 100)
+    ;
+    const sources = [_][]const u8{ js, lua_source };
+    // 1 + 2, then 3 + 4 from the same JS object
+    const want = [_][]const u8{ "3 7 true true", "3 true true" };
+    for (&cases, sources, want) |*case, text, expected| {
+        var files: Files = undefined;
+        const s = try make(case, &files);
+        defer s.deinit();
+        const types = try s.schema(source);
+        var hello: Hello = .{};
+        const greeter: rt.Object(Greeter) = .init(&hello, rt.implement(Greeter, Hello));
+        try s.module("app", &.{.{ .name = "greeter", .schema = types, .trait = "Greeter", .obj = .of(greeter) }});
+        s.run(text, "implement") catch |e| {
+            std.debug.print("{t}: {s}\n", .{ case.language, s.lastError() });
+            return e;
+        };
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings(expected, s.eval("out", &buf).value);
+    }
 }
 
 test "scripts type and call game functions by their declared names" {

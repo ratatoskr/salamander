@@ -212,6 +212,18 @@ pub fn builtins(w: *Writer) Error!void {
         \\---@return F
         \\function salamander.native(signature, address) end
         \\
+        \\---`t`, named as implementing the trait by its full name like `"Wraith.WorkbenchTab"` or its own if only one schema has it, so it can be handed over where any object goes.
+        \\---@param trait string
+        \\---@param t table
+        \\---@return any
+        \\function salamander.implement(trait, t) end
+        \\
+        \\---Any object, like one a plugin's slot holds, as the trait it is, by name like `implement` takes, so its methods can be called.
+        \\---@param trait string
+        \\---@param obj any
+        \\---@return any
+        \\function salamander.as(trait, obj) end
+        \\
         \\---The full name of a declared function, like `"Kai.Player.heal"`, or nil for anything else.
         \\---@param f any
         \\---@return string|nil
