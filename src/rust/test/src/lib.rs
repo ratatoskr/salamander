@@ -289,3 +289,38 @@ pub extern "C" fn rs_game(locate: extern "C" fn(Str) -> usize) -> u32 {
     salamander::declared::set_locator(None);
     r
 }
+
+// Type info, which has to be the same as every other language's
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_type_info(which: u32) -> *const salamander::TypeInfo {
+    use salamander::TypeOf;
+    match which {
+        0 => Player::type_info(),
+        1 => scene::Graph::type_info(),
+        2 => Bag::type_info(),
+        3 => Shape::type_info(),
+        _ => std::ptr::null(),
+    }
+}
+
+// A tagged union's members, only as the tag says
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_shape() -> f32 {
+    let s = Shape::of_circle(2.5);
+    if s.r#box().is_some() || !Shape::of_none().is_none() || Shape::of_none().circle().is_some() {
+        return -1.0;
+    }
+    *s.circle().unwrap()
+}
+
+// A Vec3 through an any, and back only as one
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_any_y() -> f32 {
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    let a = salamander::Any::of(&v);
+    match (a.get::<Vec3>(), a.get::<Pair>()) {
+        (Some(back), None) => back.y,
+        _ => -1.0,
+    }
+}

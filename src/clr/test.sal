@@ -56,3 +56,12 @@ trait Counter {
     async u32 soon(u32 n);
     void bump(inout Vec3 v);
 }
+
+// One of its members, as its tag says
+enum ShapeKind : u8 { circle, box, none }
+
+union Shape : ShapeKind {
+    f32 circle;
+    Vec3 box;
+    void none;
+}

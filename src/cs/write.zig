@@ -180,8 +180,17 @@ const Gen = struct {
     /// Where a plain type is, like `global::Game.Scene.Node`, with `prefix` before its last part.
     fn plainRefWith(g: *Gen, n: []const u8, prefix: []const u8) Error![]const u8 {
         const end = Schema.namespaceEnd(n);
-        const path = if (end) |e| try g.fmt("{s}.", .{n[0..e]}) else g.nsDotOf(n);
+        const path = if (end) |e|
+            (if (g.inType(n[0..e])) try g.fmt("{s}{s}.", .{ g.nsDotOf(n[0 .. std.mem.indexOfScalar(u8, n, '.') orelse e]), n[0..e] }) else try g.fmt("{s}.", .{n[0..e]}))
+        else
+            g.nsDotOf(n);
         return g.fmt("global::{s}{s}{s}", .{ path, prefix, try g.leaf(n) });
+    }
+
+    /// Whether a scope starts with a type rather than a namespace, so it's nested in one with no namespace.
+    fn inType(g: *Gen, scope: []const u8) bool {
+        const first = scope[0 .. std.mem.indexOfScalar(u8, scope, '.') orelse scope.len];
+        return g.s.findType(first) != null or g.s.findTrait(first) != null;
     }
 
     fn plainRef(g: *Gen, n: []const u8) Error![]const u8 {
@@ -327,6 +336,7 @@ const Gen = struct {
             .string => sal ++ "Str",
             .object => sal ++ "AnyObject",
             .blob => sal_raw ++ "Blob",
+            .any => sal ++ "Any",
             .cstring => "byte*",
             .void => "void",
         };
@@ -615,6 +625,8 @@ const Gen = struct {
                 .@"opaque" => try g.print("\npublic partial struct {s} {{ }}\n", .{try g.leaf(t.name)}),
                 .func => |sig| try g.delegateDef(try g.leaf(t.name), sig),
             }
+            if (t.kind != .@"enum" and plan.ownsInfo(s, .{ .named = t.name }) and g.kindOf(t.name) != .twin) try g.typeOfPart(t, try g.leaf(t.name));
+            if (t.kind == .@"struct") if (t.kind.@"struct".tagged) |tg| try g.taggedPart(try g.leaf(t.name), tg);
             try g.print("{s}", .{close});
         }
         for (s.traits) |*t| {
@@ -626,7 +638,10 @@ const Gen = struct {
 
         // What crosses
         try g.print("\nnamespace {s}\n{{\n", .{(try g.rawNs())["global::".len..]});
-        for (s.types) |*t| if (!g.isBase(t.name) and g.kindOf(t.name) == .twin) try g.structDef(t, true);
+        for (s.types) |*t| if (!g.isBase(t.name) and g.kindOf(t.name) == .twin) {
+            try g.structDef(t, true);
+            try g.typeOfPart(t, try g.ident(try g.bare(t.name)));
+        };
         for (g.slices.items) |x| try g.print("\npublic unsafe struct {s}\n{{\n    public {s}* ptr;\n    public nuint len;\n}}\n", .{ try g.ident(x.name), try g.ty(x.ref) });
         for (g.opts.items) |x| try g.print("\npublic unsafe struct {s}\n{{\n    public {s} value;\n    public {s}Bool some;\n}}\n", .{ try g.ident(x.name), try g.ty(x.ref), sal });
         for (g.arrays.items) |x| try g.arrayDef(x);
@@ -648,6 +663,7 @@ const Gen = struct {
             try g.object(try g.bare(t.name), t.name, g.s.traitHash(t), ms, sigs, t.bases);
         }
         try g.print("}}\n", .{});
+        try g.typeInfos();
     }
 
     // What existing code declares, found through `Salamander.Declared`
@@ -826,8 +842,8 @@ const Gen = struct {
         const path = if (name.len == 0) "" else name[0..@min(end, name.len)];
         const scope = if (Schema.namespaceEnd(name) == null) "" else path;
         var ns: std.ArrayList(u8) = .empty;
-        // Only what has no namespace of its own goes in the home one
-        if (scope.len == 0) try ns.appendSlice(g.a, g.o.namespace);
+        // Only what has no namespace of its own goes in the home one, like what's nested in a type that has none
+        if (scope.len == 0 or g.inType(scope)) try ns.appendSlice(g.a, g.o.namespace);
         var nested: std.ArrayList([]const u8) = .empty;
         var i: usize = 0;
         while (i < scope.len) {
@@ -889,6 +905,96 @@ const Gen = struct {
         }
         try g.print(";\n", .{});
     }
+
+    // Type info, each type's `TypeInfo` for `Any`, in the class with the constants
+
+    fn infosRef(g: *Gen) Error![]const u8 {
+        return g.fmt("global::{s}{s}.SalamanderTypes", .{ g.nsDot(), try g.ident(g.o.class) });
+    }
+
+    /// `ITypeOf` for a struct as it crosses.
+    fn typeOfPart(g: *Gen, t: *const Schema.Type, name: []const u8) Error!void {
+        const h = plan.info(g.s, .{ .named = t.name }).hash;
+        try g.print("\npublic unsafe partial struct {s} : {s}ITypeOf\n{{\n    /// <summary>What it is, for Any.</summary>\n    public static {s}TypeInfo* SalamanderType => {s}.info_{x:0>16};\n}}\n", .{ name, sal, sal_raw, try g.infosRef(), h });
+    }
+
+    /// For each member: `TryGet` what it holds if the tag says it's that one, and `Of` to make one.
+    fn taggedPart(g: *Gen, n: []const u8, tg: Schema.Tagged) Error!void {
+        const tag = try g.plainRef(tg.tag);
+        try g.print("\npublic unsafe partial struct {s}\n{{\n", .{n});
+        for (tg.members) |m| {
+            const p = try g.pascal(m.name);
+            if (m.type == .prim and m.type.prim == .void) {
+                try g.print("    public bool Is{s} => Tag == {s}.{s};\n", .{ p, tag, p });
+                try g.print("    public static {s} Of{s}() => new() {{ Tag = {s}.{s} }};\n", .{ n, p, tag, p });
+                continue;
+            }
+            const member_type = try g.ty(m.type);
+            try g.print("    /// <summary>Its {s}, if the tag says it's that one.</summary>\n    public bool TryGet{s}(out {s} value)\n    {{\n        value = Tag == {s}.{s} ? Payload.{s} : default;\n        return Tag == {s}.{s};\n    }}\n", .{ m.name, p, member_type, tag, p, p, tag, p });
+            try g.print("    public static {s} Of{s}({s} value)\n    {{\n        var s = new {s} {{ Tag = {s}.{s} }};\n        s.Payload.{s} = value;\n        return s;\n    }}\n", .{ n, p, member_type, n, tag, p, p });
+        }
+        try g.print("}}\n", .{});
+    }
+
+    fn typeInfos(g: *Gen) Error!void {
+        const s = g.s;
+        var o: InfoOut = .{ .g = g, .fills = .init(g.a) };
+        for (s.types) |t| if (!g.isBase(t.name) and plan.ownsInfo(s, .{ .named = t.name })) {
+            _ = try o.ref(.{ .named = t.name });
+        };
+        if (o.order.items.len == 0) return;
+        const close = try g.open("");
+        try g.print("\npublic static unsafe partial class {s}\n{{\n    /// <summary>Each type's info, for Any. Kept for good.</summary>\n    public static unsafe class SalamanderTypes\n    {{\n", .{try g.ident(g.o.class)});
+        for (o.order.items) |h| try g.print("        public static readonly {s}TypeInfo* info_{x:0>16};\n", .{ sal_raw, h });
+        try g.print("\n        static SalamanderTypes()\n        {{\n", .{});
+        for (o.order.items) |h| try g.print("            info_{x:0>16} = {s}TypeInfos.Make();\n", .{ h, sal });
+        try g.print("{s}        }}\n    }}\n}}\n{s}", .{ o.fills.written(), close });
+    }
+
+    /// Each type's info once, by hash, made first and filled after so they can point at each other.
+    const InfoOut = struct {
+        g: *Gen,
+        fills: std.Io.Writer.Allocating,
+        order: std.ArrayList(u64) = .empty,
+
+        fn ref(o: *InfoOut, r: Ref) Error![]const u8 {
+            const g = o.g;
+            const i = plan.info(g.s, r);
+            const name = try g.fmt("info_{x:0>16}", .{i.hash});
+            for (o.order.items) |h| if (h == i.hash) return name;
+            try o.order.append(g.a, i.hash);
+            var out: std.Io.Writer.Allocating = .init(g.a);
+            const w = &out.writer;
+            try w.print("            *{s} = new {s}TypeInfo {{ kind = {s}TypeKind.{s}, name = {s}TypeInfos.Name(\"{s}\"u8), hash = 0x{x:0>16}UL, size = {d}, alignment = {d}", .{ name, sal_raw, sal, try g.pascal(i.kind), sal, i.name, i.hash, i.size, i.alignment });
+            if (i.child) |c| try w.print(", child = {s}", .{try o.ref(c)});
+            if (i.len > 0) try w.print(", len = {d}", .{i.len});
+            var fields: plan.InfoFields = .init(g.s, r);
+            if (fields.t != null and fields.next() != null) {
+                fields = .init(g.s, r);
+                try w.print(", fields = {s}TypeInfos.Fields(", .{sal});
+                var first = true;
+                while (fields.next()) |f| {
+                    try w.print("{s}new {s}FieldInfo {{ name = {s}TypeInfos.Name(\"{s}\"u8), type = {s}, offset = {d}, bit = {d}, bits = {d} }}", .{ if (first) "" else ", ", sal_raw, sal, f.name, try o.ref(f.type), f.offset, f.bit, f.bits });
+                    first = false;
+                }
+                try w.writeAll(")");
+            }
+            var values: plan.InfoValues = .init(g.s, r);
+            if (values.next() != null) {
+                values = .init(g.s, r);
+                try w.print(", values = {s}TypeInfos.Values(", .{sal});
+                var first = true;
+                while (values.next()) |v| {
+                    try w.print("{s}new {s}EnumValue {{ name = {s}TypeInfos.Name(\"{s}\"u8), value = {d} }}", .{ if (first) "" else ", ", sal_raw, sal, v.name, v.value });
+                    first = false;
+                }
+                try w.writeAll(")");
+            }
+            try w.writeAll(" };\n");
+            try o.fills.writer.writeAll(out.written());
+            return name;
+        }
+    };
 
     fn enumDef(g: *Gen, t: *const Schema.Type, e: Schema.Enum) Error!void {
         try g.print("\npublic enum {s} : {s}\n{{\n", .{ try g.leaf(t.name), g.enumBacking(e.backing) });

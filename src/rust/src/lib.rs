@@ -147,6 +147,98 @@ impl Object {
     }
 }
 
+/// A value with its `TypeInfo`, borrowed for the call. A null type is none.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Any {
+    pub r#type: *const TypeInfo,
+    pub value: *const c_void,
+}
+
+impl Default for Any {
+    fn default() -> Self {
+        Any { r#type: std::ptr::null(), value: std::ptr::null() }
+    }
+}
+
+impl Any {
+    /// `v`, a generated type's value. It has to outlive the call.
+    pub fn of<T: TypeOf>(v: &T) -> Any {
+        Any { r#type: T::type_info(), value: v as *const T as *const c_void }
+    }
+
+    /// The value if it's a `T`, matched by hash.
+    pub fn get<T: TypeOf>(&self) -> Option<&T> {
+        // SAFETY: an any's type says what its value is, and it lives for the call
+        unsafe {
+            if self.r#type.is_null() || (*self.r#type).hash != T::type_info().hash {
+                return None;
+            }
+            Some(&*(self.value as *const T))
+        }
+    }
+}
+
+/// What a type is. Generated types implement it.
+pub trait TypeOf {
+    fn type_info() -> &'static TypeInfo;
+}
+
+// Type info is kept for good, and never changes
+unsafe impl Send for TypeInfo {}
+unsafe impl Sync for TypeInfo {}
+unsafe impl Send for FieldInfo {}
+unsafe impl Sync for FieldInfo {}
+unsafe impl Send for EnumValue {}
+unsafe impl Sync for EnumValue {}
+
+const fn str_of(s: &'static str) -> Str {
+    Str { ptr: s.as_ptr(), len: s.len() }
+}
+
+impl TypeInfo {
+    /// For generated code, with its padding zeroed.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(kind: TypeKind, name: &'static str, hash: u64, size: usize, alignment: usize, child: *const TypeInfo, len: usize, fields: &'static [FieldInfo], values: &'static [EnumValue]) -> TypeInfo {
+        // SAFETY: every field is a number or pointer, which zero is fine for
+        let mut t: TypeInfo = unsafe { ::core::mem::zeroed() };
+        t.kind = kind;
+        t.name = str_of(name);
+        t.hash = hash;
+        t.size = size;
+        t.alignment = alignment;
+        t.child = child as *mut TypeInfo;
+        t.len = len;
+        t.fields = Slice { ptr: fields.as_ptr(), len: fields.len() };
+        t.values = Slice { ptr: values.as_ptr(), len: values.len() };
+        t
+    }
+}
+
+impl FieldInfo {
+    /// For generated code, with its padding zeroed.
+    pub const fn new(name: &'static str, ty: *const TypeInfo, offset: usize, bit: u16, bits: u16) -> FieldInfo {
+        // SAFETY: as for `TypeInfo::new`
+        let mut f: FieldInfo = unsafe { ::core::mem::zeroed() };
+        f.name = str_of(name);
+        f.r#type = ty as *mut TypeInfo;
+        f.offset = offset;
+        f.bit = bit;
+        f.bits = bits;
+        f
+    }
+}
+
+impl EnumValue {
+    pub const fn new(name: &'static str, value: i64) -> EnumValue {
+        // SAFETY: as for `TypeInfo::new`
+        let mut v: EnumValue = unsafe { ::core::mem::zeroed() };
+        v.name = str_of(name);
+        v.value = value;
+        v
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MethodInfo {

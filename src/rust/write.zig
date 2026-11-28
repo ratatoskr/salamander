@@ -279,6 +279,7 @@ const Gen = struct {
             .string => g.fmt("{s}::Str", .{g.sal()}),
             .object => g.fmt("{s}::Object", .{g.sal()}),
             .blob => g.fmt("{s}::Blob", .{g.sal()}),
+            .any => g.fmt("{s}::Any", .{g.sal()}),
             .cstring => "*const u8",
             .void => "()",
         };
@@ -565,8 +566,68 @@ const Gen = struct {
             try g.object(t.name, t, ms, g.s.traitHash(t), t.name, sigs);
         };
         try g.declared();
+        try g.typeInfos();
         try g.finish();
     }
+
+    // Type info, `TypeOf` for each type, which `Any` uses
+
+    fn typeInfos(g: *Gen) Error!void {
+        const s = g.s;
+        const any = for (s.types) |t| {
+            if (!g.aliased(t.at) and plan.ownsInfo(s, .{ .named = t.name })) break true;
+        } else false;
+        if (!any) return;
+        g.cur = "";
+        var o: InfoOut = .{ .g = g, .statics = .init(g.a) };
+        try g.print("\n// Type info, for Any\n", .{});
+        for (s.types) |t| if (!g.aliased(t.at) and plan.ownsInfo(s, .{ .named = t.name })) {
+            const info = try o.ref(.{ .named = t.name });
+            try g.print("\nimpl {s}::TypeOf for {s} {{\n    fn type_info() -> &'static {s}::TypeInfo {{\n        &{s}\n    }}\n}}\n", .{ g.sal(), try g.qual(t.name), g.sal(), info });
+        };
+        try g.print("{s}", .{o.statics.written()});
+    }
+
+    /// Each type's info as a static named by its hash, once.
+    const InfoOut = struct {
+        g: *Gen,
+        statics: std.Io.Writer.Allocating,
+        seen: std.AutoHashMapUnmanaged(u64, void) = .empty,
+
+        fn ref(o: *InfoOut, r: Ref) Error![]const u8 {
+            const g = o.g;
+            const crate = g.sal();
+            const i = plan.info(g.s, r);
+            const name = try g.fmt("SAL_INFO_{X:0>16}", .{i.hash});
+            const gop = try o.seen.getOrPut(g.a, i.hash);
+            if (gop.found_existing) return name;
+            const child = if (i.child) |c| try g.fmt("&raw const {s}", .{try o.ref(c)}) else "::core::ptr::null()";
+            var fields: plan.InfoFields = .init(g.s, r);
+            var count: usize = 0;
+            while (fields.next()) |_| count += 1;
+            var fields_ref: []const u8 = "&[]";
+            if (count > 0) {
+                fields = .init(g.s, r);
+                var items: std.Io.Writer.Allocating = .init(g.a);
+                while (fields.next()) |f| try items.writer.print("    {s}::FieldInfo::new(\"{s}\", &raw const {s}, {d}, {d}, {d}),\n", .{ crate, f.name, try o.ref(f.type), f.offset, f.bit, f.bits });
+                try o.statics.writer.print("\n#[doc(hidden)]\npub static SAL_FIELDS_{X:0>16}: [{s}::FieldInfo; {d}] = [\n{s}];\n", .{ i.hash, crate, count, items.written() });
+                fields_ref = try g.fmt("&SAL_FIELDS_{X:0>16}", .{i.hash});
+            }
+            var values: plan.InfoValues = .init(g.s, r);
+            count = 0;
+            while (values.next()) |_| count += 1;
+            var values_ref: []const u8 = "&[]";
+            if (count > 0) {
+                values = .init(g.s, r);
+                var items: std.Io.Writer.Allocating = .init(g.a);
+                while (values.next()) |v| try items.writer.print("    {s}::EnumValue::new(\"{s}\", {d}),\n", .{ crate, v.name, v.value });
+                try o.statics.writer.print("\n#[doc(hidden)]\npub static SAL_VALUES_{X:0>16}: [{s}::EnumValue; {d}] = [\n{s}];\n", .{ i.hash, crate, count, items.written() });
+                values_ref = try g.fmt("&SAL_VALUES_{X:0>16}", .{i.hash});
+            }
+            try o.statics.writer.print("\n#[doc(hidden)]\npub static {s}: {s}::TypeInfo = {s}::TypeInfo::new({s}::TypeKind::{s}, \"{s}\", 0x{x:0>16}, {d}, {d}, {s}, {d}, {s}, {s});\n", .{ name, crate, crate, crate, try g.valueName(i.kind), i.name, i.hash, i.size, i.alignment, child, i.len, fields_ref, values_ref });
+            return name;
+        }
+    };
 
     /// Each module once, nested in the ones around it.
     fn finish(g: *Gen) Error!void {
@@ -768,6 +829,27 @@ const Gen = struct {
         if (!is_union) for (fields.items) |f| {
             try g.print("const _: () = assert!(::core::mem::offset_of!({s}, {s}) == 0x{x}, \"{s}.{s}'s offset\");\n", .{ n, try g.field(f.name), f.offset, t.name, f.name });
         };
+        if (t.kind == .@"struct") if (t.kind.@"struct".tagged) |tg| try g.taggedImpl(n, tg);
+    }
+
+    /// For each member: what it holds if the tag says it's that one, and `of_` ones that make one.
+    fn taggedImpl(g: *Gen, n: []const u8, tg: Schema.Tagged) Error!void {
+        const tag = try g.qual(tg.tag);
+        try g.print("\nimpl {s} {{\n", .{n});
+        for (tg.members) |m| {
+            const f = try g.field(m.name);
+            const v = try g.valueName(m.name);
+            const bare = try snake(g.a, m.name);
+            if (m.type == .prim and m.type.prim == .void) {
+                try g.print("    pub fn is_{s}(&self) -> bool {{\n        self.tag == {s}::{s}\n    }}\n", .{ bare, tag, v });
+                try g.print("    pub fn of_{s}() -> Self {{\n        Self {{ tag: {s}::{s}, ..Default::default() }}\n    }}\n", .{ bare, tag, v });
+                continue;
+            }
+            const ty = try g.decl(m.type);
+            try g.print("    /// Its {s}, if the tag says it's that one.\n    pub fn {s}(&self) -> Option<&{s}> {{\n        // SAFETY: the tag says which member's there\n        if self.tag == {s}::{s} {{ Some(unsafe {{ &self.payload.{s} }}) }} else {{ None }}\n    }}\n", .{ m.name, f, ty, tag, v, f });
+            try g.print("    pub fn of_{s}(v: {s}) -> Self {{\n        let mut s = Self {{ tag: {s}::{s}, ..Default::default() }};\n        s.payload.{s} = v;\n        s\n    }}\n", .{ bare, ty, tag, v, f });
+        }
+        try g.print("}}\n", .{});
     }
 
     // Objects

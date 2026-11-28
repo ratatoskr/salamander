@@ -73,6 +73,46 @@ fn traitsHost() !*const clr.Host {
     return h;
 }
 
+const TypeInfo = rt.core.raw.TypeInfo;
+
+/// The same all the way down, but for where it lives.
+fn expectSameInfo(want: *const TypeInfo, got: *const TypeInfo, depth: usize) !void {
+    errdefer std.debug.print("in {s}\n", .{want.name.get()});
+    try testing.expectEqual(want.kind, got.kind);
+    try testing.expectEqualStrings(want.name.get(), got.name.get());
+    try testing.expectEqual(want.hash, got.hash);
+    try testing.expectEqual(want.size, got.size);
+    try testing.expectEqual(want.alignment, got.alignment);
+    try testing.expectEqual(want.len, got.len);
+    if (depth > 4) return;
+    try testing.expectEqual(want.child == null, got.child == null);
+    if (want.child) |c| try expectSameInfo(c, got.child.?, depth + 1);
+    try testing.expectEqual(want.fields.len, got.fields.len);
+    for (want.fields.get(), got.fields.get()) |a, b| {
+        try testing.expectEqualStrings(a.name.get(), b.name.get());
+        try testing.expectEqual(a.offset, b.offset);
+        try testing.expectEqual(a.bit, b.bit);
+        try testing.expectEqual(a.bits, b.bits);
+        try expectSameInfo(a.type.?, b.type.?, depth + 1);
+    }
+    try testing.expectEqual(want.values.len, got.values.len);
+    for (want.values.get(), got.values.get()) |a, b| {
+        try testing.expectEqualStrings(a.name.get(), b.name.get());
+        try testing.expectEqual(a.value, b.value);
+    }
+}
+
+test "C#'s type info is Zig's, and its anys carry it" {
+    const h = try traitsHost();
+    const info = try h.function(*const fn (i32) callconv(clr.cc) ?*const TypeInfo, testing.allocator, traits, "TypeInfoOf");
+    const want = [_]*const TypeInfo{ &schema.Mixed.salamander_type, &schema.Tagged.salamander_type, &schema.Flags.salamander_type, &schema.Shape.salamander_type };
+    for (want, 0..) |w, i| try expectSameInfo(w, info(@intCast(i)).?, 0);
+    const any_y = try h.function(*const fn () callconv(clr.cc) f32, testing.allocator, traits, "AnyY");
+    try testing.expectEqual(2, any_y());
+    const shape = try h.function(*const fn () callconv(clr.cc) f32, testing.allocator, traits, "ShapeRadius");
+    try testing.expectEqual(2.5, shape());
+}
+
 test "C# lays out the schema like Zig" {
     const h = try traitsHost();
     const layout = try h.function(*const fn ([*]usize, i32) callconv(clr.cc) i32, testing.allocator, traits, "Layout");

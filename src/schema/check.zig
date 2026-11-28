@@ -162,8 +162,13 @@ const Checker = struct {
 
     fn ref(c: Checker, r: Ref, use: Use, at: usize) Error!void {
         switch (r) {
-            .prim => |p| if (p == .void and use != .ret and use != .pointee)
-                return c.fail(at, "void is only for returns and pointers, like void*", .{}),
+            .prim => |p| {
+                if (p == .void and use != .ret and use != .pointee)
+                    return c.fail(at, "void is only for returns and pointers, like void*", .{});
+                // Its type info is the caller's, which could go away after the call
+                if (p == .any and use != .param)
+                    return c.fail(at, "any is only for parameters, borrowed for the call", .{});
+            },
             .named => |n| {
                 if (c.s.findType(n)) |t| {
                     if (t.kind == .@"error") return c.fail(at, "{s} is an error set, so it goes after a '!', like 'T!{s}'", .{ n, n });
@@ -183,7 +188,11 @@ const Checker = struct {
             .optional => |child| {
                 switch (child.*) {
                     .optional => return c.fail(at, "?? doesn't mean anything more than ?", .{}),
-                    .prim => |p| if (p == .cstring) return c.fail(at, "a cstring can already be null", .{}),
+                    .prim => |p| switch (p) {
+                        .cstring => return c.fail(at, "a cstring can already be null", .{}),
+                        .any => return c.fail(at, "an any can already be empty, with no type", .{}),
+                        else => {},
+                    },
                     .result => return c.fail(at, "an optional result is written '?T!E'", .{}),
                     else => {},
                 }
@@ -220,7 +229,7 @@ const Checker = struct {
     /// Memory with nothing the callee could keep pointing at, so it's fine to write over.
     fn plainValue(c: Checker, r: Schema.Ref) bool {
         return switch (r) {
-            .prim => |p| p != .string and p != .object and p != .blob and p != .void and p != .cstring,
+            .prim => |p| p != .string and p != .object and p != .blob and p != .void and p != .cstring and p != .any,
             .named => |n| if (c.s.findType(n)) |t| switch (t.kind) {
                 .@"struct", .@"union", .@"enum", .bitfield => !c.s.holdsObject(r),
                 else => false,
@@ -283,7 +292,26 @@ const Checker = struct {
         }
     }
 
+    /// Each member names one of its tag's values, and each value has a member.
+    fn tagged(c: Checker, t: *const Schema.Type, tg: Schema.Tagged) Error!void {
+        const e = c.s.findType(tg.tag);
+        if (e == null or e.?.kind != .@"enum") return c.fail(t.at, "{s}'s tag {s} isn't an enum", .{ t.name, tg.tag });
+        for (tg.members, 0..) |m, i| {
+            for (tg.members[0..i]) |o| if (std.mem.eql(u8, m.name, o.name)) return c.fail(m.at, "{s} already has a {s}", .{ t.name, m.name });
+            if (Schema.enumValue(e.?, m.name) == null) return c.fail(m.at, "{s}.{s}: {s} has no value called that", .{ t.name, m.name, tg.tag });
+            // Its struct's own fields
+            if (std.mem.eql(u8, m.name, "tag") or std.mem.eql(u8, m.name, "payload")) return c.fail(m.at, "{s}.{s}: a tagged union's members can't be called tag or payload", .{ t.name, m.name });
+        }
+        for (e.?.kind.@"enum".values) |v| {
+            const has = for (tg.members) |m| {
+                if (std.mem.eql(u8, m.name, v.name)) break true;
+            } else false;
+            if (!has) return c.fail(t.at, "{s} has no member for {s}.{s}. Use `void {s};` for one that holds nothing", .{ t.name, tg.tag, v.name, v.name });
+        }
+    }
+
     fn structDef(c: Checker, t: *const Schema.Type, st: Schema.Struct) Error!void {
+        if (st.tagged) |tg| try c.tagged(t, tg);
         const base_size: usize = if (c.s.baseOf(t)) |b| b.size else 0;
         for (st.fields, 0..) |f, i| {
             if (f.type == .array and f.type.array.count != null) try c.counted(t, f) else try c.ref(f.type, .field, f.at);

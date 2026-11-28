@@ -3,6 +3,167 @@
 #[allow(unused_imports)]
 use crate::{Info, Owner};
 
+const _: () = assert!(::core::mem::size_of::<usize>() == 8, "these types are for 64-bit code");
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+pub struct TypeKind(pub u8);
+
+impl TypeKind {
+    pub const VOID: TypeKind = TypeKind(0);
+    pub const BOOL: TypeKind = TypeKind(1);
+    pub const U8: TypeKind = TypeKind(2);
+    pub const U16: TypeKind = TypeKind(3);
+    pub const U32: TypeKind = TypeKind(4);
+    pub const U64: TypeKind = TypeKind(5);
+    pub const I8: TypeKind = TypeKind(6);
+    pub const I16: TypeKind = TypeKind(7);
+    pub const I32: TypeKind = TypeKind(8);
+    pub const I64: TypeKind = TypeKind(9);
+    pub const USIZE: TypeKind = TypeKind(10);
+    pub const ISIZE: TypeKind = TypeKind(11);
+    pub const F32: TypeKind = TypeKind(12);
+    pub const F64: TypeKind = TypeKind(13);
+    pub const UTF8: TypeKind = TypeKind(14);
+    pub const UTF16: TypeKind = TypeKind(15);
+    pub const STRING: TypeKind = TypeKind(16);
+    pub const CSTRING: TypeKind = TypeKind(17);
+    pub const BLOB: TypeKind = TypeKind(18);
+    pub const ANY: TypeKind = TypeKind(19);
+    pub const OBJECT: TypeKind = TypeKind(20);
+    pub const STRUCT: TypeKind = TypeKind(21);
+    pub const UNION: TypeKind = TypeKind(22);
+    pub const ENUM: TypeKind = TypeKind(23);
+    pub const BITFIELD: TypeKind = TypeKind(24);
+    pub const ERROR: TypeKind = TypeKind(25);
+    pub const OPAQUE: TypeKind = TypeKind(26);
+    pub const FUNC: TypeKind = TypeKind(27);
+    pub const POINTER: TypeKind = TypeKind(28);
+    pub const ARRAY: TypeKind = TypeKind(29);
+    pub const SLICE: TypeKind = TypeKind(30);
+    pub const OPTIONAL: TypeKind = TypeKind(31);
+    pub const TAGGED: TypeKind = TypeKind(32);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FieldInfo {
+    pub name: crate::Str,
+    pub r#type: *mut TypeInfo,
+    pub offset: usize,
+    pub bit: u16,
+    pub bits: u16,
+    pub _pad_0x24: [u8; 0x4],
+}
+
+impl ::core::default::Default for FieldInfo {
+    fn default() -> Self {
+        // Plain data, which zero is a value of
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+
+const _: () = assert!(::core::mem::size_of::<FieldInfo>() == 0x28, "FieldInfo's size");
+const _: () = assert!(::core::mem::align_of::<FieldInfo>() == 8, "FieldInfo's alignment");
+const _: () = assert!(::core::mem::offset_of!(FieldInfo, name) == 0x0, "FieldInfo.name's offset");
+const _: () = assert!(::core::mem::offset_of!(FieldInfo, r#type) == 0x10, "FieldInfo.type's offset");
+const _: () = assert!(::core::mem::offset_of!(FieldInfo, offset) == 0x18, "FieldInfo.offset's offset");
+const _: () = assert!(::core::mem::offset_of!(FieldInfo, bit) == 0x20, "FieldInfo.bit's offset");
+const _: () = assert!(::core::mem::offset_of!(FieldInfo, bits) == 0x22, "FieldInfo.bits's offset");
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EnumValue {
+    pub name: crate::Str,
+    pub value: i64,
+}
+
+impl ::core::default::Default for EnumValue {
+    fn default() -> Self {
+        // Plain data, which zero is a value of
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+
+const _: () = assert!(::core::mem::size_of::<EnumValue>() == 0x18, "EnumValue's size");
+const _: () = assert!(::core::mem::align_of::<EnumValue>() == 8, "EnumValue's alignment");
+const _: () = assert!(::core::mem::offset_of!(EnumValue, name) == 0x0, "EnumValue.name's offset");
+const _: () = assert!(::core::mem::offset_of!(EnumValue, value) == 0x10, "EnumValue.value's offset");
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TypeInfo {
+    pub kind: TypeKind,
+    pub _pad_0x1: [u8; 0x7],
+    pub name: crate::Str,
+    pub hash: u64,
+    pub size: usize,
+    pub alignment: usize,
+    pub child: *mut TypeInfo,
+    pub len: usize,
+    pub fields: crate::Slice<FieldInfo>,
+    pub values: crate::Slice<EnumValue>,
+}
+
+impl ::core::default::Default for TypeInfo {
+    fn default() -> Self {
+        // Plain data, which zero is a value of
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+
+const _: () = assert!(::core::mem::size_of::<TypeInfo>() == 0x60, "TypeInfo's size");
+const _: () = assert!(::core::mem::align_of::<TypeInfo>() == 8, "TypeInfo's alignment");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, kind) == 0x0, "TypeInfo.kind's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, name) == 0x8, "TypeInfo.name's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, hash) == 0x18, "TypeInfo.hash's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, size) == 0x20, "TypeInfo.size's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, alignment) == 0x28, "TypeInfo.alignment's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, child) == 0x30, "TypeInfo.child's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, len) == 0x38, "TypeInfo.len's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, fields) == 0x40, "TypeInfo.fields's offset");
+const _: () = assert!(::core::mem::offset_of!(TypeInfo, values) == 0x50, "TypeInfo.values's offset");
+
+// Codes a result can give, with the ones every result can.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct JsonError(pub u32);
+
+impl JsonError {
+    pub const INVALID: JsonError = JsonError(1);
+    pub const MISMATCH: JsonError = JsonError(2);
+    pub const CANCELLED: JsonError = JsonError(crate::CANCELLED);
+    pub const UNSUPPORTED: JsonError = JsonError(crate::UNSUPPORTED);
+    pub const GONE: JsonError = JsonError(crate::GONE);
+}
+
+impl crate::ErrorCode for JsonError {
+    const CANCELLED: Self = JsonError::CANCELLED;
+    const UNSUPPORTED: Self = JsonError::UNSUPPORTED;
+    const GONE: Self = JsonError::GONE;
+    fn from_code(code: u32) -> Self {
+        JsonError(code)
+    }
+    fn code(self) -> u32 {
+        self.0
+    }
+}
+
+impl ::core::fmt::Display for JsonError {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        match self.0 {
+            1 => f.write_str("Invalid"),
+            2 => f.write_str("Mismatch"),
+            crate::CANCELLED => f.write_str("Cancelled"),
+            crate::UNSUPPORTED => f.write_str("Unsupported"),
+            crate::GONE => f.write_str("Gone"),
+            c => write!(f, "code {c}"),
+        }
+    }
+}
+
+impl ::std::error::Error for JsonError {}
+
 // fn
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -960,11 +1121,13 @@ pub struct HostTable {
     pub explain: Option<unsafe extern "C" fn(usize, crate::Str, crate::Str)>,
     pub blob: Option<unsafe extern "C" fn(usize, usize) -> Blob>,
     pub explanation: Option<unsafe extern "C" fn(usize, crate::Str) -> crate::Str>,
+    pub to_json: Option<unsafe extern "C" fn(usize, crate::Any, *mut Blob) -> u32>,
+    pub from_json: Option<unsafe extern "C" fn(usize, crate::Str, *mut TypeInfo, *mut Blob) -> u32>,
 }
 
 unsafe impl ::core::marker::Sync for HostTable {}
 
-pub static HOST_METHODS: [crate::MethodInfo; 15] = [
+pub static HOST_METHODS: [crate::MethodInfo; 17] = [
     crate::MethodInfo { name: crate::Str::new("keep"), sig: 0x4ce616ab4981d471 },
     crate::MethodInfo { name: crate::Str::new("owner"), sig: 0xd7d90ab13f0ab689 },
     crate::MethodInfo { name: crate::Str::new("adopt"), sig: 0xc47f13ff4338efbe },
@@ -980,14 +1143,16 @@ pub static HOST_METHODS: [crate::MethodInfo; 15] = [
     crate::MethodInfo { name: crate::Str::new("explain"), sig: 0xbc81c85ec14c7cb6 },
     crate::MethodInfo { name: crate::Str::new("blob"), sig: 0x2389c3107004eb9e },
     crate::MethodInfo { name: crate::Str::new("explanation"), sig: 0x21df4a6f6664aca4 },
+    crate::MethodInfo { name: crate::Str::new("toJson"), sig: 0xbcf24114610a3494 },
+    crate::MethodInfo { name: crate::Str::new("fromJson"), sig: 0xe0c972d817ddd49c },
 ];
 
 pub static HOST_INFO: crate::Info = crate::Info {
-    hash: 0x55bd96ce14ed1173,
+    hash: 0xc8060548ca6e24de,
     abi: crate::ABI_VERSION,
     name: crate::Str::new("Host"),
     methods: HOST_METHODS.as_ptr(),
-    methods_len: 15,
+    methods_len: 17,
 };
 
 unsafe impl crate::TraitObject for Host {
@@ -1159,6 +1324,28 @@ impl Host {
         }
     }
 
+    pub fn to_json(&self, value: crate::Any) -> Result<Blob, JsonError> {
+        unsafe {
+            let Some(sal_t) = self.table.as_ref() else { return Err(<JsonError as crate::ErrorCode>::GONE) };
+            let Some(sal_f) = sal_t.to_json else { return Err(<JsonError as crate::ErrorCode>::UNSUPPORTED) };
+            let Some(_sal_g) = crate::Entered::new(sal_t.salamander_owner) else { return Err(<JsonError as crate::ErrorCode>::GONE) };
+            let mut sal_out: Blob = ::core::mem::zeroed();
+            let sal_c = sal_f(self.data, value, &mut sal_out);
+            if sal_c == crate::OK { Ok(sal_out) } else { Err(<JsonError as crate::ErrorCode>::from_code(sal_c)) }
+        }
+    }
+
+    pub fn from_json(&self, text: &str, r#type: *mut TypeInfo) -> Result<Blob, JsonError> {
+        unsafe {
+            let Some(sal_t) = self.table.as_ref() else { return Err(<JsonError as crate::ErrorCode>::GONE) };
+            let Some(sal_f) = sal_t.from_json else { return Err(<JsonError as crate::ErrorCode>::UNSUPPORTED) };
+            let Some(_sal_g) = crate::Entered::new(sal_t.salamander_owner) else { return Err(<JsonError as crate::ErrorCode>::GONE) };
+            let mut sal_out: Blob = ::core::mem::zeroed();
+            let sal_c = sal_f(self.data, crate::Str::new(text), r#type, &mut sal_out);
+            if sal_c == crate::OK { Ok(sal_out) } else { Err(<JsonError as crate::ErrorCode>::from_code(sal_c)) }
+        }
+    }
+
 }
 
 // What implements Host. Ones left out give zero, or Unsupported for a result
@@ -1223,6 +1410,14 @@ pub trait HostImpl {
         let _ = (name,);
         ""
     }
+    fn to_json(&self, value: crate::Any) -> Result<Blob, JsonError> {
+        let _ = (value,);
+        Err(<JsonError as crate::ErrorCode>::UNSUPPORTED)
+    }
+    fn from_json(&self, text: &str, r#type: *mut TypeInfo) -> Result<Blob, JsonError> {
+        let _ = (text, r#type,);
+        Err(<JsonError as crate::ErrorCode>::UNSUPPORTED)
+    }
 }
 
 // What a table made from T calls
@@ -1248,6 +1443,8 @@ impl<T: HostImpl> HostThunks<T> {
         explain: Some(Self::explain),
         blob: Some(Self::blob),
         explanation: Some(Self::explanation),
+        to_json: Some(Self::to_json),
+        from_json: Some(Self::from_json),
     };
 
     unsafe extern "C" fn keep(sal_this: usize, size: usize, alignment: usize) -> *mut ::core::ffi::c_void {
@@ -1345,6 +1542,34 @@ impl<T: HostImpl> HostThunks<T> {
             crate::Str::new(sal_v)
         })
     }
+
+    unsafe extern "C" fn to_json(sal_this: usize, value: crate::Any, sal_out: *mut Blob) -> u32 {
+        crate::guard_code(|| unsafe {
+            match (*(sal_this as *const T)).to_json(value) {
+                Ok(sal_v) => {
+                    if !sal_out.is_null() {
+                        *sal_out = sal_v;
+                    }
+                    crate::OK
+                }
+                Err(e) => crate::ErrorCode::code(e),
+            }
+        })
+    }
+
+    unsafe extern "C" fn from_json(sal_this: usize, text: crate::Str, r#type: *mut TypeInfo, sal_out: *mut Blob) -> u32 {
+        crate::guard_code(|| unsafe {
+            match (*(sal_this as *const T)).from_json(text.get(), r#type) {
+                Ok(sal_v) => {
+                    if !sal_out.is_null() {
+                        *sal_out = sal_v;
+                    }
+                    crate::OK
+                }
+                Err(e) => crate::ErrorCode::code(e),
+            }
+        })
+    }
 }
 
 unsafe impl<T: HostImpl> crate::Implements<T> for Host {
@@ -1352,3 +1577,136 @@ unsafe impl<T: HostImpl> crate::Implements<T> for Host {
         (const { &HostThunks::<T>::TABLE }) as *const HostTable as *const ::core::ffi::c_void
     }
 }
+
+// Type info, for Any
+
+impl crate::TypeOf for TypeKind {
+    fn type_info() -> &'static crate::TypeInfo {
+        &SAL_INFO_38755C277A23C1D2
+    }
+}
+
+impl crate::TypeOf for FieldInfo {
+    fn type_info() -> &'static crate::TypeInfo {
+        &SAL_INFO_930E4E803CCEFBBE
+    }
+}
+
+impl crate::TypeOf for EnumValue {
+    fn type_info() -> &'static crate::TypeInfo {
+        &SAL_INFO_A2281B07E75A5553
+    }
+}
+
+impl crate::TypeOf for TypeInfo {
+    fn type_info() -> &'static crate::TypeInfo {
+        &SAL_INFO_80FE1A7B6567933A
+    }
+}
+
+#[doc(hidden)]
+pub static SAL_INFO_88201FB960FF6465: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::U8, "u8", 0x88201fb960ff6465, 1, 1, ::core::ptr::null(), 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_VALUES_38755C277A23C1D2: [crate::EnumValue; 33] = [
+    crate::EnumValue::new("void", 0),
+    crate::EnumValue::new("bool", 1),
+    crate::EnumValue::new("u8", 2),
+    crate::EnumValue::new("u16", 3),
+    crate::EnumValue::new("u32", 4),
+    crate::EnumValue::new("u64", 5),
+    crate::EnumValue::new("i8", 6),
+    crate::EnumValue::new("i16", 7),
+    crate::EnumValue::new("i32", 8),
+    crate::EnumValue::new("i64", 9),
+    crate::EnumValue::new("usize", 10),
+    crate::EnumValue::new("isize", 11),
+    crate::EnumValue::new("f32", 12),
+    crate::EnumValue::new("f64", 13),
+    crate::EnumValue::new("utf8", 14),
+    crate::EnumValue::new("utf16", 15),
+    crate::EnumValue::new("string", 16),
+    crate::EnumValue::new("cstring", 17),
+    crate::EnumValue::new("blob", 18),
+    crate::EnumValue::new("any", 19),
+    crate::EnumValue::new("object", 20),
+    crate::EnumValue::new("struct", 21),
+    crate::EnumValue::new("union", 22),
+    crate::EnumValue::new("enum", 23),
+    crate::EnumValue::new("bitfield", 24),
+    crate::EnumValue::new("error", 25),
+    crate::EnumValue::new("opaque", 26),
+    crate::EnumValue::new("func", 27),
+    crate::EnumValue::new("pointer", 28),
+    crate::EnumValue::new("array", 29),
+    crate::EnumValue::new("slice", 30),
+    crate::EnumValue::new("optional", 31),
+    crate::EnumValue::new("tagged", 32),
+];
+
+#[doc(hidden)]
+pub static SAL_INFO_38755C277A23C1D2: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::ENUM, "TypeKind", 0x38755c277a23c1d2, 1, 1, &raw const SAL_INFO_88201FB960FF6465, 0, &[], &SAL_VALUES_38755C277A23C1D2);
+
+#[doc(hidden)]
+pub static SAL_INFO_230602E697ABD70A: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::STRING, "string", 0x230602e697abd70a, 16, 8, ::core::ptr::null(), 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_A71AE6C26BEEAE86: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::U64, "u64", 0xa71ae6c26beeae86, 8, 8, ::core::ptr::null(), 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_9EF11F0AC368FF8E: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::USIZE, "usize", 0x9ef11f0ac368ff8e, 8, 8, ::core::ptr::null(), 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_CD917EDBFBA6260D: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::OPTIONAL, "", 0xcd917edbfba6260d, 8, 8, &raw const SAL_INFO_108BEE06DAF7DB90, 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_966669590E76814A: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::SLICE, "", 0x966669590e76814a, 16, 8, &raw const SAL_INFO_930E4E803CCEFBBE, 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_2B2FCA9E40318602: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::I64, "i64", 0x2b2fca9e40318602, 8, 8, ::core::ptr::null(), 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_FIELDS_A2281B07E75A5553: [crate::FieldInfo; 2] = [
+    crate::FieldInfo::new("name", &raw const SAL_INFO_230602E697ABD70A, 0, 0, 0),
+    crate::FieldInfo::new("value", &raw const SAL_INFO_2B2FCA9E40318602, 16, 0, 0),
+];
+
+#[doc(hidden)]
+pub static SAL_INFO_A2281B07E75A5553: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::STRUCT, "EnumValue", 0xa2281b07e75a5553, 24, 8, ::core::ptr::null(), 0, &SAL_FIELDS_A2281B07E75A5553, &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_EF3BD0932A2A28D7: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::SLICE, "", 0xef3bd0932a2a28d7, 16, 8, &raw const SAL_INFO_A2281B07E75A5553, 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_FIELDS_80FE1A7B6567933A: [crate::FieldInfo; 9] = [
+    crate::FieldInfo::new("kind", &raw const SAL_INFO_38755C277A23C1D2, 0, 0, 0),
+    crate::FieldInfo::new("name", &raw const SAL_INFO_230602E697ABD70A, 8, 0, 0),
+    crate::FieldInfo::new("hash", &raw const SAL_INFO_A71AE6C26BEEAE86, 24, 0, 0),
+    crate::FieldInfo::new("size", &raw const SAL_INFO_9EF11F0AC368FF8E, 32, 0, 0),
+    crate::FieldInfo::new("alignment", &raw const SAL_INFO_9EF11F0AC368FF8E, 40, 0, 0),
+    crate::FieldInfo::new("child", &raw const SAL_INFO_CD917EDBFBA6260D, 48, 0, 0),
+    crate::FieldInfo::new("len", &raw const SAL_INFO_9EF11F0AC368FF8E, 56, 0, 0),
+    crate::FieldInfo::new("fields", &raw const SAL_INFO_966669590E76814A, 64, 0, 0),
+    crate::FieldInfo::new("values", &raw const SAL_INFO_EF3BD0932A2A28D7, 80, 0, 0),
+];
+
+#[doc(hidden)]
+pub static SAL_INFO_80FE1A7B6567933A: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::STRUCT, "TypeInfo", 0x80fe1a7b6567933a, 96, 8, ::core::ptr::null(), 0, &SAL_FIELDS_80FE1A7B6567933A, &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_108BEE06DAF7DB90: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::POINTER, "", 0x108bee06daf7db90, 8, 8, &raw const SAL_INFO_80FE1A7B6567933A, 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_INFO_692558B056101A44: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::U16, "u16", 0x692558b056101a44, 2, 2, ::core::ptr::null(), 0, &[], &[]);
+
+#[doc(hidden)]
+pub static SAL_FIELDS_930E4E803CCEFBBE: [crate::FieldInfo; 5] = [
+    crate::FieldInfo::new("name", &raw const SAL_INFO_230602E697ABD70A, 0, 0, 0),
+    crate::FieldInfo::new("type", &raw const SAL_INFO_108BEE06DAF7DB90, 16, 0, 0),
+    crate::FieldInfo::new("offset", &raw const SAL_INFO_9EF11F0AC368FF8E, 24, 0, 0),
+    crate::FieldInfo::new("bit", &raw const SAL_INFO_692558B056101A44, 32, 0, 0),
+    crate::FieldInfo::new("bits", &raw const SAL_INFO_692558B056101A44, 34, 0, 0),
+];
+
+#[doc(hidden)]
+pub static SAL_INFO_930E4E803CCEFBBE: crate::TypeInfo = crate::TypeInfo::new(crate::TypeKind::STRUCT, "FieldInfo", 0x930e4e803ccefbbe, 40, 8, ::core::ptr::null(), 0, &SAL_FIELDS_930E4E803CCEFBBE, &[]);

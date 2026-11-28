@@ -21,6 +21,60 @@ trait Blob {
     void release();
 }
 
+// What a TypeInfo describes. Numbers and text are kinds of their own
+enum TypeKind : u8 {
+    void, bool, u8, u16, u32, u64, i8, i16, i32, i64, usize, isize, f32, f64, utf8, utf16,
+    string, cstring, blob, any,
+    // A trait or object, as data and table
+    object,
+    struct, union, enum, bitfield, error, opaque, func,
+    pointer, array, slice, optional,
+    // A tagged union: its tag enum's info is child, and each value in values is the tag for the field at that index
+    tagged,
+}
+
+// One of a struct's or union's fields, or a bitfield's members
+struct FieldInfo {
+    string name;
+    TypeInfo* type;
+    // Bytes from the start of what it's in
+    usize offset;
+    // A bitfield member's first bit and how many it has
+    u16 bit;
+    u16 bits;
+}
+
+// One of an enum's or error set's values
+struct EnumValue {
+    string name;
+    i64 value;
+}
+
+// A type's layout as it crosses, for code that handles types it wasn't built with. Generated code has one for each, kept for good
+struct TypeInfo {
+    TypeKind kind;
+    // Like Posing.PoseFile. Empty for what has no name, like []T
+    string name;
+    // Covers its name and layout, so the same type matches in another binary
+    u64 hash;
+    usize size;
+    usize alignment;
+    // What a pointer, array, slice or optional holds, or an enum's or bitfield's backing
+    ?TypeInfo* child;
+    // An array's
+    usize len;
+    []FieldInfo fields;
+    []EnumValue values;
+}
+
+// Why JSON couldn't be read. Types with no JSON, like pointers, are Unsupported
+error JsonError {
+    // Not JSON
+    Invalid = 1,
+    // JSON, but not of the type
+    Mismatch = 2,
+}
+
 // Work for one thread. Any thread posts, the thread that owns it runs it with poll.
 trait Queue {
     // False if it couldn't be kept
@@ -82,4 +136,8 @@ trait Host {
     Blob blob(usize size);
     // What this thread last explained for the error called name, or empty. Clears it. Good till its next one.
     string explanation(string name);
+    // value as JSON, the same in every language
+    Blob!JsonError toJson(any value);
+    // text as a value of type, at the blob's start, with its text and slices after it. Releasing the blob frees it all
+    Blob!JsonError fromJson(string text, TypeInfo* type);
 }

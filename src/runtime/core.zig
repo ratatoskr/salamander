@@ -4,6 +4,10 @@ const rt = @import("root.zig");
 const generated = @This();
 const std = @import("std");
 
+comptime {
+    if (@sizeOf(usize) != 8) @compileError("salamander: these types are for 64-bit code");
+}
+
 pub const Owner = opaque {};
 
 pub const Info = opaque {};
@@ -11,6 +15,131 @@ pub const Info = opaque {};
 pub const Task = rt.Fn(.{ .name = "fn", .Fn = fn () void, .sig = 0x1188479494fbb434 });
 
 pub const Release = rt.Fn(.{ .name = "fn", .Fn = fn (usize) void, .sig = 0x660b0a254c9cb4fe });
+
+pub const TypeKind = enum(u8) {
+    void = 0,
+    bool = 1,
+    u8 = 2,
+    u16 = 3,
+    u32 = 4,
+    u64 = 5,
+    i8 = 6,
+    i16 = 7,
+    i32 = 8,
+    i64 = 9,
+    usize = 10,
+    isize = 11,
+    f32 = 12,
+    f64 = 13,
+    utf8 = 14,
+    utf16 = 15,
+    string = 16,
+    cstring = 17,
+    blob = 18,
+    any = 19,
+    object = 20,
+    @"struct" = 21,
+    @"union" = 22,
+    @"enum" = 23,
+    bitfield = 24,
+    @"error" = 25,
+    @"opaque" = 26,
+    func = 27,
+    pointer = 28,
+    array = 29,
+    slice = 30,
+    optional = 31,
+    tagged = 32,
+    _,
+    pub const salamander_type: rt.core.raw.TypeInfo = .{ .kind = .@"enum", .name = .init("TypeKind"), .hash = 0x38755c277a23c1d2, .size = 1, .alignment = 1, .child = @constCast(&rt.core.raw.TypeInfo{ .kind = .u8, .name = .init("u8"), .hash = 0x88201fb960ff6465, .size = 1, .alignment = 1 }), .values = .init(&.{
+        .{ .name = .init("void"), .value = 0 },
+        .{ .name = .init("bool"), .value = 1 },
+        .{ .name = .init("u8"), .value = 2 },
+        .{ .name = .init("u16"), .value = 3 },
+        .{ .name = .init("u32"), .value = 4 },
+        .{ .name = .init("u64"), .value = 5 },
+        .{ .name = .init("i8"), .value = 6 },
+        .{ .name = .init("i16"), .value = 7 },
+        .{ .name = .init("i32"), .value = 8 },
+        .{ .name = .init("i64"), .value = 9 },
+        .{ .name = .init("usize"), .value = 10 },
+        .{ .name = .init("isize"), .value = 11 },
+        .{ .name = .init("f32"), .value = 12 },
+        .{ .name = .init("f64"), .value = 13 },
+        .{ .name = .init("utf8"), .value = 14 },
+        .{ .name = .init("utf16"), .value = 15 },
+        .{ .name = .init("string"), .value = 16 },
+        .{ .name = .init("cstring"), .value = 17 },
+        .{ .name = .init("blob"), .value = 18 },
+        .{ .name = .init("any"), .value = 19 },
+        .{ .name = .init("object"), .value = 20 },
+        .{ .name = .init("struct"), .value = 21 },
+        .{ .name = .init("union"), .value = 22 },
+        .{ .name = .init("enum"), .value = 23 },
+        .{ .name = .init("bitfield"), .value = 24 },
+        .{ .name = .init("error"), .value = 25 },
+        .{ .name = .init("opaque"), .value = 26 },
+        .{ .name = .init("func"), .value = 27 },
+        .{ .name = .init("pointer"), .value = 28 },
+        .{ .name = .init("array"), .value = 29 },
+        .{ .name = .init("slice"), .value = 30 },
+        .{ .name = .init("optional"), .value = 31 },
+        .{ .name = .init("tagged"), .value = 32 },
+    }) };
+};
+
+pub const FieldInfo = struct {
+    name: []const u8 = "",
+    type: ?*raw.TypeInfo = std.mem.zeroes(?*raw.TypeInfo),
+    offset: usize = std.mem.zeroes(usize),
+    bit: u16 = std.mem.zeroes(u16),
+    bits: u16 = std.mem.zeroes(u16),
+    pub const salamander_type: rt.core.raw.TypeInfo = .{ .kind = .@"struct", .name = .init("FieldInfo"), .hash = 0x930e4e803ccefbbe, .size = 40, .alignment = 8, .fields = .init(&.{
+        .{ .name = .init("name"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .string, .name = .init("string"), .hash = 0x230602e697abd70a, .size = 16, .alignment = 8 }), .offset = 0, .bit = 0, .bits = 0 },
+        .{ .name = .init("type"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .pointer, .name = .init(""), .hash = 0x108bee06daf7db90, .size = 8, .alignment = 8, .child = @constCast(&generated.TypeInfo.salamander_type) }), .offset = 16, .bit = 0, .bits = 0 },
+        .{ .name = .init("offset"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .usize, .name = .init("usize"), .hash = 0x9ef11f0ac368ff8e, .size = 8, .alignment = 8 }), .offset = 24, .bit = 0, .bits = 0 },
+        .{ .name = .init("bit"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .u16, .name = .init("u16"), .hash = 0x692558b056101a44, .size = 2, .alignment = 2 }), .offset = 32, .bit = 0, .bits = 0 },
+        .{ .name = .init("bits"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .u16, .name = .init("u16"), .hash = 0x692558b056101a44, .size = 2, .alignment = 2 }), .offset = 34, .bit = 0, .bits = 0 },
+    }) };
+    pub const salamander_raw = raw.FieldInfo;
+};
+
+pub const EnumValue = struct {
+    name: []const u8 = "",
+    value: i64 = std.mem.zeroes(i64),
+    pub const salamander_type: rt.core.raw.TypeInfo = .{ .kind = .@"struct", .name = .init("EnumValue"), .hash = 0xa2281b07e75a5553, .size = 24, .alignment = 8, .fields = .init(&.{
+        .{ .name = .init("name"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .string, .name = .init("string"), .hash = 0x230602e697abd70a, .size = 16, .alignment = 8 }), .offset = 0, .bit = 0, .bits = 0 },
+        .{ .name = .init("value"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .i64, .name = .init("i64"), .hash = 0x2b2fca9e40318602, .size = 8, .alignment = 8 }), .offset = 16, .bit = 0, .bits = 0 },
+    }) };
+    pub const salamander_raw = raw.EnumValue;
+};
+
+pub const TypeInfo = struct {
+    kind: TypeKind = std.mem.zeroes(TypeKind),
+    name: []const u8 = "",
+    hash: u64 = std.mem.zeroes(u64),
+    size: usize = std.mem.zeroes(usize),
+    alignment: usize = std.mem.zeroes(usize),
+    child: ?*raw.TypeInfo = std.mem.zeroes(?*raw.TypeInfo),
+    len: usize = std.mem.zeroes(usize),
+    fields: []const FieldInfo = &.{},
+    values: []const EnumValue = &.{},
+    pub const salamander_type: rt.core.raw.TypeInfo = .{ .kind = .@"struct", .name = .init("TypeInfo"), .hash = 0x80fe1a7b6567933a, .size = 96, .alignment = 8, .fields = .init(&.{
+        .{ .name = .init("kind"), .type = @constCast(&generated.TypeKind.salamander_type), .offset = 0, .bit = 0, .bits = 0 },
+        .{ .name = .init("name"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .string, .name = .init("string"), .hash = 0x230602e697abd70a, .size = 16, .alignment = 8 }), .offset = 8, .bit = 0, .bits = 0 },
+        .{ .name = .init("hash"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .u64, .name = .init("u64"), .hash = 0xa71ae6c26beeae86, .size = 8, .alignment = 8 }), .offset = 24, .bit = 0, .bits = 0 },
+        .{ .name = .init("size"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .usize, .name = .init("usize"), .hash = 0x9ef11f0ac368ff8e, .size = 8, .alignment = 8 }), .offset = 32, .bit = 0, .bits = 0 },
+        .{ .name = .init("alignment"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .usize, .name = .init("usize"), .hash = 0x9ef11f0ac368ff8e, .size = 8, .alignment = 8 }), .offset = 40, .bit = 0, .bits = 0 },
+        .{ .name = .init("child"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .optional, .name = .init(""), .hash = 0xcd917edbfba6260d, .size = 8, .alignment = 8, .child = @constCast(&rt.core.raw.TypeInfo{ .kind = .pointer, .name = .init(""), .hash = 0x108bee06daf7db90, .size = 8, .alignment = 8, .child = @constCast(&generated.TypeInfo.salamander_type) }) }), .offset = 48, .bit = 0, .bits = 0 },
+        .{ .name = .init("len"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .usize, .name = .init("usize"), .hash = 0x9ef11f0ac368ff8e, .size = 8, .alignment = 8 }), .offset = 56, .bit = 0, .bits = 0 },
+        .{ .name = .init("fields"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .slice, .name = .init(""), .hash = 0x966669590e76814a, .size = 16, .alignment = 8, .child = @constCast(&generated.FieldInfo.salamander_type) }), .offset = 64, .bit = 0, .bits = 0 },
+        .{ .name = .init("values"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .slice, .name = .init(""), .hash = 0xef3bd0932a2a28d7, .size = 16, .alignment = 8, .child = @constCast(&generated.EnumValue.salamander_type) }), .offset = 80, .bit = 0, .bits = 0 },
+    }) };
+    pub const salamander_raw = raw.TypeInfo;
+};
+
+pub const JsonError = error{ Invalid, Mismatch };
+pub const JsonErrorCode = enum(u32) { Invalid = 1, Mismatch = 2, _ };
 
 pub const Blob = extern struct {
     data: usize = 0,
@@ -172,7 +301,7 @@ pub const Host = extern struct {
 
     pub const salamander = struct {
         pub const name = "Host";
-        pub const hash: u64 = 0x55bd96ce14ed1173;
+        pub const hash: u64 = 0xc8060548ca6e24de;
         pub const methods: []const rt.Method = &.{
             .{ .name = "keep", .Fn = fn (usize, usize) ?*anyopaque, .sig = 0x4ce616ab4981d471 },
             .{ .name = "owner", .Fn = fn ([]const u8) ?*Owner, .sig = 0xd7d90ab13f0ab689 },
@@ -189,6 +318,8 @@ pub const Host = extern struct {
             .{ .name = "explain", .Fn = fn ([]const u8, []const u8) void, .sig = 0xbc81c85ec14c7cb6 },
             .{ .name = "blob", .Fn = fn (usize) Blob, .sig = 0x2389c3107004eb9e },
             .{ .name = "explanation", .Fn = fn ([]const u8) []const u8, .sig = 0x21df4a6f6664aca4 },
+            .{ .name = "toJson", .Fn = fn (rt.Any) (JsonError || rt.Failure)!Blob, .Errors = JsonErrorCode, .sig = 0xbcf24114610a3494 },
+            .{ .name = "fromJson", .Fn = fn ([]const u8, *raw.TypeInfo) (JsonError || rt.Failure)!Blob, .Errors = JsonErrorCode, .sig = 0xe0c972d817ddd49c },
         };
     };
 
@@ -255,6 +386,14 @@ pub const Host = extern struct {
     pub fn explanation(self: Host, name: []const u8) []const u8 {
         return rt.invoke(Host, "explanation", self, .{name});
     }
+
+    pub fn toJson(self: Host, value: rt.Any) (JsonError || rt.Failure)!Blob {
+        return rt.invoke(Host, "toJson", self, .{value});
+    }
+
+    pub fn fromJson(self: Host, text: []const u8, @"type": *raw.TypeInfo) (JsonError || rt.Failure)!Blob {
+        return rt.invoke(Host, "fromJson", self, .{ text, @"type" });
+    }
 };
 
 /// Every type as it crosses, for implementing traits and passing tables around.
@@ -263,6 +402,36 @@ pub const raw = struct {
     pub const Info = generated.Info;
     pub const Task = generated.Task;
     pub const Release = generated.Release;
+    pub const TypeKind = generated.TypeKind;
+    pub const FieldInfo = extern struct {
+        name: rt.String = std.mem.zeroes(rt.String),
+        type: ?*raw.TypeInfo = std.mem.zeroes(?*raw.TypeInfo),
+        offset: usize = std.mem.zeroes(usize),
+        bit: u16 = std.mem.zeroes(u16),
+        bits: u16 = std.mem.zeroes(u16),
+        _pad_0x24: [0x4]u8 = @splat(0),
+        pub const salamander_type = generated.FieldInfo.salamander_type;
+    };
+    pub const EnumValue = extern struct {
+        name: rt.String = std.mem.zeroes(rt.String),
+        value: i64 = std.mem.zeroes(i64),
+        pub const salamander_type = generated.EnumValue.salamander_type;
+    };
+    pub const TypeInfo = extern struct {
+        kind: raw.TypeKind = std.mem.zeroes(raw.TypeKind),
+        _pad_0x1: [0x7]u8 = @splat(0),
+        name: rt.String = std.mem.zeroes(rt.String),
+        hash: u64 = std.mem.zeroes(u64),
+        size: usize = std.mem.zeroes(usize),
+        alignment: usize = std.mem.zeroes(usize),
+        child: ?*raw.TypeInfo = std.mem.zeroes(?*raw.TypeInfo),
+        len: usize = std.mem.zeroes(usize),
+        fields: rt.Slice(raw.FieldInfo) = std.mem.zeroes(rt.Slice(raw.FieldInfo)),
+        values: rt.Slice(raw.EnumValue) = std.mem.zeroes(rt.Slice(raw.EnumValue)),
+        pub const salamander_type = generated.TypeInfo.salamander_type;
+    };
+    pub const JsonError = generated.JsonError;
+    pub const JsonErrorCode = generated.JsonErrorCode;
     pub const Blob = generated.Blob;
     pub const Queue = generated.Queue;
     pub const Promise = generated.Promise;

@@ -124,6 +124,32 @@ struct Object {
     explicit constexpr operator bool() const { return table != nullptr; }
 };
 
+struct TypeInfo;
+
+// What a type is, as `info`. Generated headers give one for each of their types
+template <class T>
+struct TypeOf;
+
+// A value with its TypeInfo, borrowed for the call. A null type is none.
+struct Any {
+    const TypeInfo *type;
+    const void *value;
+
+    explicit constexpr operator bool() const { return type != nullptr; }
+
+    // v, a generated type's value. It has to outlive the call
+    template <class T>
+    static Any of(const T &v) { return {&TypeOf<T>::info, &v}; }
+
+    // The value if it's a T, matched by hash
+    template <class T>
+    const T *as() const {
+        const auto &want = TypeOf<T>::info;
+        const std::remove_cvref_t<decltype(want)> *got = type;
+        return got && got->hash == want.hash ? static_cast<const T *>(value) : nullptr;
+    }
+};
+
 struct MethodInfo {
     String name;
     uint64_t sig;

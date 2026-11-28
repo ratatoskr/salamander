@@ -939,7 +939,7 @@ const Parser = struct {
         }
         var s: Schema.Struct = .{};
         if (p.tok.tag == .colon) {
-            if (is_union) return p.fail(p.tok.start, "a union can't have a base", .{});
+            if (is_union) return p.taggedDef(a, kw.start, type_name, params.*, types);
             _ = p.advance();
             s.base = try p.namedType("a base type");
         }
@@ -998,6 +998,44 @@ const Parser = struct {
             .size = if (a.has(.size)) a.size else Schema.Type.auto,
             .annotations = a.extra,
             .kind = if (is_union) .{ .@"union" = s } else .{ .@"struct" = s },
+        };
+    }
+
+    /// `union Shape : Kind { Circle circle; void none; }`, after its name, as a struct of its `tag` and a nested `payload` union.
+    fn taggedDef(p: *P, a: Anns, start: usize, type_name: []const u8, params: []const []const u8, types: *List(Schema.Type)) Error!Schema.Type {
+        if (params.len > 0) return p.fail(start, "{s}: a tagged union can't be generic", .{type_name});
+        try p.allow(a, &.{}, "a tagged union");
+        _ = p.advance();
+        const tag = try p.namedType("the enum naming its members");
+        _ = try p.expect(.l_brace, "'{{'");
+        var members: List(Schema.Field) = .{};
+        var held: List(Schema.Field) = .{};
+        while (p.tok.tag != .r_brace) {
+            const fa = try p.anns();
+            try p.allow(fa, &.{}, "a tagged union's member");
+            const at = p.tok.start;
+            const ty = try p.typeRef();
+            const n = try p.name("the member's name");
+            _ = try p.expect(.semicolon, "';'");
+            const f: Schema.Field = .{ .name = n, .type = ty, .at = @intCast(at) };
+            try members.append(p, f);
+            if (!(ty == .prim and ty.prim == .void)) try held.append(p, f);
+        }
+        _ = p.advance();
+        p.optionalSemicolon();
+        var fields: List(Schema.Field) = .{};
+        try fields.append(p, .{ .name = "tag", .type = .{ .named = tag }, .offset = Schema.Type.auto, .at = @intCast(start) });
+        const held_done = try held.done(p);
+        if (held_done.len > 0) {
+            const payload = try p.dotted(type_name, Schema.payload_name);
+            try types.append(p, .{ .name = payload, .at = @intCast(start), .nested = true, .kind = .{ .@"union" = .{ .fields = held_done } } });
+            try fields.append(p, .{ .name = "payload", .type = .{ .named = payload }, .offset = Schema.Type.auto, .at = @intCast(start) });
+        }
+        return .{
+            .name = type_name,
+            .at = @intCast(start),
+            .annotations = a.extra,
+            .kind = .{ .@"struct" = .{ .fields = try fields.done(p), .tagged = .{ .tag = tag, .members = try members.done(p) } } },
         };
     }
 
@@ -1367,6 +1405,14 @@ const Parser = struct {
                     const statics = try r.p.arena.dupe(Schema.Static, st.statics);
                     for (statics) |*v| v.type = try r.ref(v.type, region, subst, v.at);
                     done.statics = statics;
+                    if (st.tagged) |tg| {
+                        const members = try r.p.arena.dupe(Schema.Field, tg.members);
+                        // A void member has nothing to resolve
+                        for (members) |*m| if (!(m.type == .prim and m.type.prim == .void)) {
+                            m.type = try r.ref(m.type, region, subst, m.at);
+                        };
+                        done.tagged = .{ .tag = try r.name(tg.tag, region, subst, t.at), .members = members };
+                    }
                     out.kind = if (t.kind == .@"union") .{ .@"union" = done } else .{ .@"struct" = done };
                 },
                 .bitfield => |b| {

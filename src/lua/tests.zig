@@ -196,6 +196,52 @@ test "scripts call Zig's impl" {
     try testing.expectEqual(42, f.int("got"));
 }
 
+/// Only weighs Vec2s.
+const Weigher = struct {
+    pub fn weigh(_: *Weigher, value: rt.Any) f32 {
+        const v = value.as(Vec2) orelse return -1;
+        return v.x;
+    }
+    pub fn grow(_: *Weigher, s: B.Shape) B.Shape {
+        return switch (s) {
+            .circle => |r| .{ .circle = r * 2 },
+            .label => |l| .{ .label = if (std.mem.eql(u8, l, "a")) "aa" else l },
+            .none => .none,
+        };
+    }
+};
+
+test "anys cross as { type, value }" {
+    var f: Fixture = try .init();
+    defer f.deinit();
+    var w: Weigher = .{};
+    const t = try f.binder.trait(f.module, "Scale");
+    try f.binder.wrap(f.l, t, .of(rt.Object(B.Scale).init(&w, rt.implement(B.Scale, Weigher))));
+    c.lua_setglobal(f.l, lua.cstr("scale"));
+    f.binder.pushBuiltin(f.l);
+    c.lua_setglobal(f.l, lua.cstr("salamander"));
+    try f.eval(
+        \\assert(scale:weigh(salamander.any("Vec2", { x = 3, y = 4 })) == 3, "as a Vec2")
+        \\assert(scale:weigh({ type = "Mode", value = "two" }) == -1, "as a Mode")
+        \\assert(not pcall(scale.weigh, scale, salamander.any("Nope", 1)), "an unknown type")
+        \\assert(scale:grow({ circle = 2 }).circle == 4, "a circle")
+        \\assert(scale:grow({ label = "a" }).label == "aa", "a label")
+        \\assert(scale:grow("none") == "none", "none")
+        \\assert(not pcall(scale.grow, scale, "circle"), "a member that holds something, by name")
+        \\W = {}
+        \\function W:weigh(a) return a.type == "Vec2" and a.value.y or -1 end
+    );
+
+    // And a script's, given one from Zig
+    _ = c.lua_getglobal(f.l, lua.cstr("W"));
+    defer lua.pop(f.l, 1);
+    const back = (try f.binder.unwrap(f.l, t, lua.top(f.l))).as(rt.Object(B.Scale));
+    var vec: Vec2 = .{ .x = 1, .y = 7 };
+    try testing.expectEqual(7, back.weigh(.of(&vec)));
+    var mode: Mode = .two;
+    try testing.expectEqual(-1, back.weigh(.of(&mode)));
+}
+
 var factor: i32 = 3;
 
 fn triple(by: *i32, x: i32) i32 {

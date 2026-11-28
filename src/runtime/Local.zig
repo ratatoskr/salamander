@@ -261,6 +261,30 @@ pub fn blob(_: *Local, size: usize) core.Blob {
     return rt.blobs.hostMake(size);
 }
 
+pub fn toJson(l: *Local, value: rt.Any) (core.JsonError || rt.Failure)!core.Blob {
+    const info = value.type orelse return error.Unsupported;
+    const text = rt.json.stringifyInfo(std.heap.smp_allocator, info, value.value orelse return error.Unsupported, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => l.failJson(error.Unsupported, "out of memory"),
+        error.Unsupported => l.failJson(error.Unsupported, "it holds something with no JSON, like a pointer or object"),
+    };
+    defer std.heap.smp_allocator.free(text);
+    return rt.blobs.copy(text) catch l.failJson(error.Unsupported, "out of memory");
+}
+
+pub fn fromJson(l: *Local, text: []const u8, info: *core.raw.TypeInfo) (core.JsonError || rt.Failure)!core.Blob {
+    return rt.json.parseInfoBlob(std.heap.smp_allocator, info, text) catch |err| switch (err) {
+        error.Invalid => error.Invalid,
+        error.Mismatch => error.Mismatch,
+        error.Unsupported => l.failJson(error.Unsupported, "it holds something with no JSON, like a pointer or object"),
+        error.OutOfMemory => l.failJson(error.Unsupported, "out of memory"),
+    };
+}
+
+fn failJson(l: *Local, err: anytype, message: []const u8) @TypeOf(err) {
+    l.explain(@errorName(err), message);
+    return err;
+}
+
 /// Per thread, in the host's binary. Set as a call fails, read as its error's shown.
 threadlocal var explained_name: [64]u8 = undefined;
 threadlocal var explained_name_len: usize = 0;

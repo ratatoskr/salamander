@@ -337,6 +337,15 @@ test "mistakes say where and why" {
         .{ "struct A { ?u32 x; }", "in memory, ? only goes on pointers" },
         .{ "struct A { u32!E x; } error E { X }", "A.x: a result like 'T!E' is only for returns" },
         .{ "struct A { void x; }", "A.x: void is only for returns" },
+        .{ "struct A { any x; }", "1:12: any is only for parameters" },
+        .{ "enum K : u8 { a, b } union U : K { u32 a; }", "U has no member for K.b" },
+        .{ "enum K : u8 { a } union U : K { u32 a; u32 c; }", "U.c: K has no value called that" },
+        .{ "struct K { u32 x; } union U : K { u32 x; }", "U's tag K isn't an enum" },
+        .{ "enum K : u8 { tag } union U : K { u32 tag; }", "members can't be called tag or payload" },
+        .{ "enum K : u8 { a } union U<T> : K { T a; }", "a tagged union can't be generic" },
+        .{ "trait T { any get(); }", "any is only for parameters" },
+        .{ "trait T { void f([]any xs); }", "any is only for parameters" },
+        .{ "trait T { void f(?any x); }", "an any can already be empty" },
         .{ "struct A { u32 x; } struct A { u32 y; }", "already something named A" },
         .{ "[Sig(\"90\")] struct A { u32 x; }", "there's no [Sig]" },
         .{ "[foo.Bar] struct A { u32 x; }", "there's no namespace 'foo'" },
@@ -616,4 +625,45 @@ test "signatures name namespaced code and generics" {
     var written = try schema.parseSignature(testing.allocator, source, "fn void (Game.Box<u16>* b)", .{ .namespaces = wraith, .uses = &.{"wraith"} }, null);
     defer written.deinit();
     try testing.expectEqual(2, written.schema.findType("Game.Box<u16>").?.size);
+}
+
+fn typeHashOf(source: []const u8, name: []const u8) !u64 {
+    var parsed = try parseTest(source, .{ .pointer_size = 8 });
+    defer parsed.deinit();
+    return schema.plan.typeHash(parsed.schema, .{ .named = name });
+}
+
+test "type hashes cover names and layout, nested ones too" {
+    const a = try typeHashOf("struct A { u32 x; B b; } struct B { f32 y; }", "A");
+    try testing.expectEqual(a, try typeHashOf("struct B { f32 y; } struct A { u32 x; B b; }", "A"));
+    try testing.expect(a != try typeHashOf("struct A { u32 x; B b; } struct B { f64 y; }", "A"));
+    try testing.expect(a != try typeHashOf("struct A { u32 z; B b; } struct B { f32 y; }", "A"));
+    // One that reaches itself stops there
+    try testing.expect(try typeHashOf("struct N { []N children; }", "N") != try typeHashOf("struct N { []N kids; }", "N"));
+}
+
+test "a tagged union is its tag, then a union of what its members hold" {
+    var parsed = try parseTest("enum K : u8 { circle, rect, none } struct Rect { f32 w; f32 h; } union Shape : K { f32 circle; Rect rect; void none; }", .{ .pointer_size = 8 });
+    defer parsed.deinit();
+    const s = parsed.schema;
+    const shape = s.findType("Shape").?;
+    try testing.expectEqualStrings("K", shape.kind.@"struct".tagged.?.tag);
+    try testing.expectEqual(3, shape.kind.@"struct".tagged.?.members.len);
+    try testing.expectEqual(12, shape.size);
+    try testing.expectEqual(0, offsetOf(s, "Shape", "tag"));
+    try testing.expectEqual(4, offsetOf(s, "Shape", "payload"));
+    // Only what holds something is in the payload
+    try testing.expectEqual(2, s.findType("Shape.Members").?.kind.@"union".fields.len);
+
+    const plan = schema.plan;
+    try testing.expectEqualStrings("tagged", plan.info(s, .{ .named = "Shape" }).kind);
+    var fields: plan.InfoFields = .init(s, .{ .named = "Shape" });
+    var values: plan.InfoValues = .init(s, .{ .named = "Shape" });
+    for ([_][]const u8{ "circle", "rect", "none" }, 0..) |want, i| {
+        const f = fields.next().?;
+        try testing.expectEqualStrings(want, f.name);
+        try testing.expectEqual(4, f.offset);
+        try testing.expectEqual(@as(i64, @intCast(i)), values.next().?.value);
+    }
+    try testing.expectEqual(null, fields.next());
 }

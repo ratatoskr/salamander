@@ -12,6 +12,7 @@ const Ref = Schema.Ref;
 const Allocator = std.mem.Allocator;
 const memory = @import("memory.zig");
 const views = @import("views.zig");
+const types = @import("types.zig");
 
 pub const Gate = @import("Gate.zig");
 
@@ -103,6 +104,8 @@ pub fn Core(comptime L: type) type {
         signatures: std.StringHashMapUnmanaged(Signature) = .empty,
         /// Calls into the script under way.
         depth: u32 = 0,
+        /// For the anys scripts make.
+        infos: types.Infos = undefined,
 
         /// A trait or function type as scripts see it.
         pub const Trait = struct {
@@ -167,6 +170,7 @@ pub fn Core(comptime L: type) type {
                 .queue = queue,
                 .root = root,
                 .current = root,
+                .infos = .init(gpa),
             };
             try host.releasable(root.owner, .init(self, onRelease));
         }
@@ -202,6 +206,20 @@ pub fn Core(comptime L: type) type {
             var keys = self.signatures.keyIterator();
             while (keys.next()) |k| self.gpa.free(k.*);
             self.signatures.deinit(self.gpa);
+            self.infos.deinit();
+        }
+
+        /// The type `name` says, with its info, for an `any` a script makes.
+        pub fn anyOf(self: *Self, name: []const u8, diagnostic: ?*Schema.Diagnostic) (SignatureError || error{OutOfMemory})!struct { Schema, Ref, *rt.core.raw.TypeInfo } {
+            const s, const r = try self.typeOf(name, diagnostic);
+            return .{ s, r, try self.infos.of(s, r) };
+        }
+
+        /// What an `any` holds, if a loaded schema has a type of that name and layout.
+        pub fn typeOfInfo(self: *Self, info: *const rt.core.raw.TypeInfo) ?struct { Schema, Ref } {
+            const s, const r = self.typeOf(info.name.get(), null) catch return null;
+            if (salamander_schema.plan.typeHash(s, r) != info.hash) return null;
+            return .{ s, r };
         }
 
         // Schemas and traits

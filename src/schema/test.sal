@@ -75,6 +75,8 @@ trait Walker {
     u32 walk(Visitor v);
     Handle* handle();
     object any();
+    // How many bytes a value's JSON takes
+    u32 measure(any value);
 }
 
 trait Transform {
@@ -154,4 +156,12 @@ namespace Scene {
     trait Picker {
         Node* pick(u32 id);
     }
+}
+// One of its members, as its tag says
+enum ShapeKind : u8 { circle, box, none }
+
+union Shape : ShapeKind {
+    f32 circle;
+    Vec3 box;
+    void none;
 }

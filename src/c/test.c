@@ -81,3 +81,23 @@ float c_get_and_set(sal_Host host, float speed) {
     Freecam_setSpeed(f, speed);
     return cam.speed;
 }
+
+/* Type info, which has to be the same as every other language's */
+const sal_TypeInfo *c_type_info(uint32_t which) {
+    switch (which) {
+    case 0: return &Player_sal_type;
+    case 1: return &Scene_Graph_sal_type;
+    case 2: return &Bag_sal_type;
+    case 3: return &Shape_sal_type;
+    default: return NULL;
+    }
+}
+
+/* A Vec3 through an any, and back only as one */
+float c_any_y(void) {
+    Vec3 v = { 1, 2, 3 };
+    sal_any a = SAL_ANY(Vec3, &v);
+    const Vec3 *back = SAL_AS(Vec3, a);
+    const Pair *other = SAL_AS(Pair, a);
+    return back && !other ? back->y : -1;
+}

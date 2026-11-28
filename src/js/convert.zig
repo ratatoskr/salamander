@@ -39,6 +39,7 @@ pub fn toJs(b: *Binder, s: Schema, r: Ref, mem: [*]const u8) Error!Value {
             },
             .object => b.wrapAny(memory.object(mem)),
             .blob => blobToJs(ctx, memory.blob(mem)),
+            .any => anyToJs(b, mem),
             .void => qjs.undefined_value,
             else => int(b, mem, p, s.pointer_size),
         },
@@ -47,6 +48,7 @@ pub fn toJs(b: *Binder, s: Schema, r: Ref, mem: [*]const u8) Error!Value {
             const t = s.findType(n).?;
             switch (t.kind) {
                 .@"struct", .@"union" => {
+                    if (t.kind == .@"struct" and t.kind.@"struct".tagged != null) return taggedToJs(b, s, t, mem);
                     const obj = c.JS_NewObject(ctx);
                     if (c.JS_IsException(obj)) return error.Exception;
                     errdefer c.JS_FreeValue(ctx, obj);
@@ -134,6 +136,7 @@ pub fn fromJs(b: *Binder, s: Schema, r: Ref, v: Value, mem: [*]u8, a: std.mem.Al
                 const made = try blobFromJs(b, v);
                 memory.putObject(mem, .{ .data = made.data, .table = made.table });
             },
+            .any => try anyFromJs(b, v, mem, a),
             .void => {},
             else => memory.put(mem, p.size(s.pointer_size), try intBits(ctx, v, p == .u64)),
         },
@@ -142,6 +145,7 @@ pub fn fromJs(b: *Binder, s: Schema, r: Ref, v: Value, mem: [*]u8, a: std.mem.Al
             const t = s.findType(n).?;
             switch (t.kind) {
                 .@"struct", .@"union" => {
+                    if (t.kind == .@"struct" and t.kind.@"struct".tagged != null) return taggedFromJs(b, s, t, v, mem, a);
                     if (!c.JS_IsObject(v)) return throw(ctx, "expected an object for {s}", .{t.name});
                     var u: memory.UnionWrite = try .init(s, r, t, mem, a);
                     var it = memory.fields(s, t);
@@ -299,6 +303,78 @@ fn blobFromJs(b: *Binder, v: Value) Error!rt.Blob {
     if (made.table == null) return error.OutOfMemory;
     @memcpy(@constCast(made.bytes())[0..bytes.len], bytes);
     return made;
+}
+
+/// A tagged union as `{ member: value }`, or a member's name when it holds nothing, like its JSON.
+fn taggedToJs(b: *Binder, s: Schema, t: *const Schema.Type, mem: [*]const u8) Error!Value {
+    const ctx = b.ctx;
+    const m = memory.liveMember(s, t, mem) orelse return qjs.null_value;
+    if (memory.isVoid(m.type)) return qjs.string(ctx, m.name);
+    const obj = c.JS_NewObject(ctx);
+    if (c.JS_IsException(obj)) return error.Exception;
+    errdefer c.JS_FreeValue(ctx, obj);
+    qjs.set(ctx, obj, m.name, try toJs(b, s, m.type, mem + memory.payloadAt(t)));
+    return obj;
+}
+
+fn taggedFromJs(b: *Binder, s: Schema, t: *const Schema.Type, v: Value, mem: [*]u8, a: std.mem.Allocator) Error!void {
+    const ctx = b.ctx;
+    const tg = t.kind.@"struct".tagged.?;
+    if (c.JS_IsString(v)) {
+        const text = qjs.toString(ctx, v) orelse return error.Exception;
+        defer text.free();
+        for (tg.members) |m| if (memory.isVoid(m.type) and std.mem.eql(u8, m.name, text.slice())) return memory.putTag(s, t, mem, m.name);
+        return throw(ctx, "{s} has no member {s} that holds nothing", .{ t.name, text.slice() });
+    }
+    if (!c.JS_IsObject(v)) return throw(ctx, "expected {{ member: value }} or a member's name for {s}", .{t.name});
+    for (tg.members) |m| if (!memory.isVoid(m.type)) {
+        const fv = qjs.get(ctx, v, m.name);
+        defer c.JS_FreeValue(ctx, fv);
+        if (c.JS_IsException(fv)) return error.Exception;
+        if (c.JS_IsUndefined(fv)) continue;
+        memory.putTag(s, t, mem, m.name);
+        return fromJs(b, s, m.type, fv, mem + memory.payloadAt(t), a);
+    };
+    return throw(ctx, "expected one of {s}'s members", .{t.name});
+}
+
+/// An `any` as `{ type, value }`. The value's null when no loaded schema has its type.
+fn anyToJs(b: *Binder, mem: [*]const u8) Error!Value {
+    const ctx = b.ctx;
+    const held = std.mem.bytesToValue(rt.Any, mem[0..@sizeOf(rt.Any)]);
+    const info = held.type orelse return qjs.null_value;
+    const obj = c.JS_NewObject(ctx);
+    if (c.JS_IsException(obj)) return error.Exception;
+    errdefer c.JS_FreeValue(ctx, obj);
+    qjs.set(ctx, obj, "type", qjs.string(ctx, info.name.get()));
+    const found = b.core.typeOfInfo(info);
+    const value = if (found != null and held.value != null) try toJs(b, found.?[0], found.?[1], @ptrCast(held.value.?)) else qjs.null_value;
+    qjs.set(ctx, obj, "value", value);
+    return obj;
+}
+
+/// `{ type, value }`, like `any("Vec3", v)` makes, as an `any` holding `value` as that type.
+fn anyFromJs(b: *Binder, v: Value, mem: [*]u8, a: std.mem.Allocator) Error!void {
+    const ctx = b.ctx;
+    if (qjs.isNullish(v)) return @memset(mem[0..@sizeOf(rt.Any)], 0);
+    const type_v = qjs.get(ctx, v, "type");
+    defer c.JS_FreeValue(ctx, type_v);
+    if (!c.JS_IsString(type_v)) return throw(ctx, "an any is {{ type, value }}, like any(\"Vec3\", v)", .{});
+    const name = qjs.toString(ctx, type_v) orelse return error.Exception;
+    defer name.free();
+    var diag: Schema.Diagnostic = .{};
+    const s, const r, const info = b.core.anyOf(name.slice(), &diag) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => throw(ctx, "{s}: {s}", .{ name.slice(), if (diag.message().len > 0) diag.message() else @errorName(e) }),
+    };
+    const m = s.memory(r) orelse return throw(ctx, "{s} has no value to hold", .{name.slice()});
+    const at = a.rawAlloc(@max(m.size, 1), .fromByteUnits(m.alignment), @returnAddress()) orelse return error.OutOfMemory;
+    @memset(at[0..m.size], 0);
+    const value_v = qjs.get(ctx, v, "value");
+    defer c.JS_FreeValue(ctx, value_v);
+    try fromJs(b, s, r, value_v, at, a);
+    const held: rt.Any = .{ .type = info, .value = at };
+    @memcpy(mem[0..@sizeOf(rt.Any)], std.mem.asBytes(&held));
 }
 
 pub fn throw(ctx: *qjs.Context, comptime fmt: []const u8, args: anytype) error{Exception} {

@@ -207,6 +207,7 @@ const Gen = struct {
             .string => "::sal::String",
             .object => "::sal::Object",
             .blob => "::sal::Blob",
+            .any => "::sal::Any",
             .cstring => "const char *",
             .void => "void",
         };
@@ -423,9 +424,83 @@ const Gen = struct {
         };
         try g.declared();
         try g.close();
+        try g.typeInfos();
 
         try g.print("\n#endif\n", .{});
     }
+
+    // Type info, `sal::TypeOf<T>::info` for each type, which `sal::Any` uses
+
+    fn typeInfos(g: *Gen) Error!void {
+        const s = g.s;
+        var named: std.ArrayList(*const Schema.Type) = .empty;
+        for (s.types) |*t| if (!g.aliased(t.at) and plan.ownsInfo(s, .{ .named = t.name })) try named.append(g.a, t);
+        if (named.items.len == 0) return;
+        try g.print("\n// Type info, for sal::Any\n", .{});
+        for (named.items) |t| try g.print("template <> struct sal::TypeOf<{s}> {{\n    static const ::sal::TypeInfo info;\n}};\n", .{try g.qual(t.name)});
+        var detail: std.Io.Writer.Allocating = .init(g.a);
+        var o: InfoOut = .{ .g = g, .detail = &detail.writer };
+        var defs: std.Io.Writer.Allocating = .init(g.a);
+        for (named.items) |t| try defs.writer.print("inline const ::sal::TypeInfo sal::TypeOf<{s}>::info = {{ {s} }};\n", .{ try g.qual(t.name), try o.body(.{ .named = t.name }) });
+        // Padding goes unnamed
+        const quiet = "#if defined(__GNUC__) || defined(__clang__)\n#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wmissing-field-initializers\"\n#endif\n";
+        const loud = "#if defined(__GNUC__) || defined(__clang__)\n#pragma GCC diagnostic pop\n#endif\n";
+        try g.print("{s}{s}{s}{s}", .{ quiet, detail.written(), defs.written(), loud });
+    }
+
+    /// Info for what has no name of its own goes in `detail`, once per hash even across headers.
+    const InfoOut = struct {
+        g: *Gen,
+        detail: *std.Io.Writer,
+        seen: std.AutoHashMapUnmanaged(u64, void) = .empty,
+
+        fn once(o: *InfoOut, h: u64) Error!bool {
+            const gop = try o.seen.getOrPut(o.g.a, h);
+            return !gop.found_existing;
+        }
+
+        fn ref(o: *InfoOut, r: Ref) Error![]const u8 {
+            const g = o.g;
+            if (plan.ownsInfo(g.s, r)) return g.fmt("const_cast<::sal::TypeInfo *>(&::sal::TypeOf<{s}>::info)", .{try g.qual(r.named)});
+            const h = plan.info(g.s, r).hash;
+            if (try o.once(h)) {
+                const b = try o.body(r);
+                try o.detail.print("#ifndef SAL_INFO_{X:0>16}\n#define SAL_INFO_{X:0>16}\nnamespace sal::detail {{\ninline const ::sal::TypeInfo info_{x:0>16} = {{ {s} }};\n}}\n#endif\n", .{ h, h, h, b });
+            }
+            return g.fmt("const_cast<::sal::TypeInfo *>(&::sal::detail::info_{x:0>16})", .{h});
+        }
+
+        fn body(o: *InfoOut, r: Ref) Error![]const u8 {
+            const g = o.g;
+            var out: std.Io.Writer.Allocating = .init(g.a);
+            const w = &out.writer;
+            const i = plan.info(g.s, r);
+            try w.print(".kind = ::sal::TypeKind::{s}, .name = {{ \"{s}\", {d} }}, .hash = 0x{x:0>16}ull, .size = {d}, .alignment = {d}", .{ try g.ident(i.kind), i.name, i.name.len, i.hash, i.size, i.alignment });
+            if (i.child) |c| try w.print(", .child = {s}", .{try o.ref(c)});
+            if (i.len > 0) try w.print(", .len = {d}", .{i.len});
+            var fields: plan.InfoFields = .init(g.s, r);
+            var count: usize = 0;
+            while (fields.next()) |_| count += 1;
+            if (count > 0) {
+                fields = .init(g.s, r);
+                var items: std.Io.Writer.Allocating = .init(g.a);
+                while (fields.next()) |f| try items.writer.print("    {{ .name = {{ \"{s}\", {d} }}, .type = {s}, .offset = {d}, .bit = {d}, .bits = {d} }},\n", .{ f.name, f.name.len, try o.ref(f.type), f.offset, f.bit, f.bits });
+                try o.detail.print("#ifndef SAL_FIELDS_{X:0>16}\n#define SAL_FIELDS_{X:0>16}\nnamespace sal::detail {{\ninline const ::sal::FieldInfo fields_{x:0>16}[] = {{\n{s}}};\n}}\n#endif\n", .{ i.hash, i.hash, i.hash, items.written() });
+                try w.print(", .fields = {{ ::sal::detail::fields_{x:0>16}, {d} }}", .{ i.hash, count });
+            }
+            var values: plan.InfoValues = .init(g.s, r);
+            count = 0;
+            while (values.next()) |_| count += 1;
+            if (count > 0) {
+                values = .init(g.s, r);
+                var items: std.Io.Writer.Allocating = .init(g.a);
+                while (values.next()) |v| try items.writer.print("    {{ .name = {{ \"{s}\", {d} }}, .value = {d}ll }},\n", .{ v.name, v.name.len, v.value });
+                try o.detail.print("#ifndef SAL_VALUES_{X:0>16}\n#define SAL_VALUES_{X:0>16}\nnamespace sal::detail {{\ninline const ::sal::EnumValue values_{x:0>16}[] = {{\n{s}}};\n}}\n#endif\n", .{ i.hash, i.hash, i.hash, items.written() });
+                try w.print(", .values = {{ ::sal::detail::values_{x:0>16}, {d} }}", .{ i.hash, count });
+            }
+            return out.written();
+        }
+    };
 
     fn intLiteral(g: *Gen, value: i128, unsigned: bool) Error![]const u8 {
         return if (unsigned) g.fmt("{d}ull", .{value}) else g.fmt("{d}ll", .{value});
@@ -549,6 +624,7 @@ const Gen = struct {
             },
         };
         if (!is_union) {
+            if (t.kind.@"struct".tagged) |tg| try g.taggedMembers(n, tg);
             try g.declaredMembers(t, fields.items);
             try g.nestedAliases(t.name, try g.structTaken(t, fields.items));
         }
@@ -560,6 +636,23 @@ const Gen = struct {
         if (!is_union) for (fields.items) |f| {
             try g.print("static_assert(offsetof({s}, {s}) == 0x{x}, \"{s}.{s}'s offset\");\n", .{ q, try g.ident(f.name), f.offset, t.name, f.name });
         };
+    }
+
+    /// For each member: what it holds if the tag says it's that one, or null, and `of_` ones that make one.
+    fn taggedMembers(g: *Gen, n: []const u8, tg: Schema.Tagged) Error!void {
+        const tag = try g.qual(tg.tag);
+        try g.print("\n    // Its member, if the tag says it's that one\n", .{});
+        for (tg.members) |m| {
+            const id_ = try g.ident(m.name);
+            if (m.type == .prim and m.type.prim == .void) {
+                try g.print("    bool {s}() const {{ return tag == {s}::{s}; }}\n", .{ id_, tag, id_ });
+                try g.print("    static {s} of_{s}() {{ {s} s{{}}; s.tag = {s}::{s}; return s; }}\n", .{ n, m.name, n, tag, id_ });
+                continue;
+            }
+            const ty = try g.fmt("decltype(payload.{s})", .{id_});
+            try g.print("    const {s} *{s}() const {{ return tag == {s}::{s} ? &payload.{s} : nullptr; }}\n", .{ ty, id_, tag, id_, id_ });
+            if (m.type != .array) try g.print("    static {s} of_{s}(const {s} &v) {{ {s} s{{}}; s.tag = {s}::{s}; s.payload.{s} = v; return s; }}\n", .{ n, m.name, try g.decl(m.type, "", false), n, tag, id_, id_ });
+        }
     }
 
     // Objects

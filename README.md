@@ -10,20 +10,14 @@ Pre-release. Expect breaking changes.
 
 ## Features
 
-- `.sal` schemas: structs, enums, bitfields, errors, and traits with plain, async and failing methods.
-- Namespaces, and generic structs that make a struct for each set of types they're used with. Names are looked up like C#'s: what's nested in the type they're in, then their own namespace and each one around it, then `use`s, with the closer one winning. Files that don't say their namespace can get one from the tool, like a plugin's name.
-- Generates Zig, with plain types and their wire forms, and C headers.
-- Generates C# that's the same JIT'd or compiled with NativeAOT. A raw layer of blittable structs and `delegate* unmanaged` tables, and plain C# over it: namespaces, strings, spans, exceptions for errors, tasks for async methods, delegates for callbacks, and interfaces to implement traits with.
-- Generates C++20 headers, with no exceptions or RTTI needed. Namespaces, `enum class`, and trait objects with methods taking `std::string_view`, `std::span` and `std::optional`. Results come back as `sal::Result`, and async methods as a `sal::Future` to `co_await`, or to give back from a coroutine. Any class implements a trait with the methods it has. Futures and held objects let go when they're done, and a game's declared functions and globals are called through methods on its structs.
-- Generates Rust over the `salamander` crate in `src/rust`. Namespaces are modules, and trait objects have methods taking `&str`, slices and `Option`, giving `Result`s, with async methods giving a `salamander::Future` to `.await`. Any type implements a trait through its `...Impl` trait, closures are function values, and `salamander::spawn` makes an async block an async method.
-- TypeScript and LuaLS typings for scripts' editors.
-- JSON of a whole schema, with docs from its comments, where each thing is, struct layouts, and how each language writes every name and method, for docs sites and tools.
-- Trait objects that cross DLLs, checked by hash, and stop when their owner goes.
-- JavaScript (QuickJS-ng) and Lua 5.5 scripts call traits and implement them.
-- Hosts .NET 10+ through hostfxr, joining the CoreCLR already in the process or starting one, and calls C#'s `[UnmanagedCallersOnly]` methods.
-- Calls and detours for signatures only known at runtime.
-- Describes code that already exists too, like a game's structs, vtables and functions.
-- Edits `.sal` text in place, for editors and tools.
+- Schemas with structs, unions, tagged unions, enums, bitfields, errors, generics, namespaces, and traits with plain, async and failing methods.
+- Generates Zig, C, C++20, Rust and C# (JIT or NativeAOT), each with idiomatic types over a shared ABI.
+- JavaScript (QuickJS-ng) and Lua 5.5 scripts call and implement traits, with TypeScript and LuaLS typings.
+- Trait objects that cross DLLs and languages, checked by hash, and stop when their owner goes.
+- The same JSON of values in every language, and `any` parameters that carry a value's type.
+- Describes existing code too, like a game's structs, vtables and functions, with calls and detours for signatures known only at runtime.
+- Hosts .NET 10+ through hostfxr.
+- JSON of a whole schema for docs and tools, and in-place `.sal` editing.
 - Windows and Linux on x64, x86 and ARM64, and macOS.
 
 ## Example
@@ -88,7 +82,41 @@ local app = require("app")
 greeting = app.greeter:greet("lua") .. ", " .. app.greeter:count() .. " so far"
 ```
 
-`script.eval("greeting", &buf)` reads it back. Scripts can implement traits too, and Zig takes them with `script.take`.
+Scripts can implement traits too, and Zig takes them with `script.take`.
+
+## JSON
+
+Every language writes a value's JSON the same way:
+- Structs and bitfields are objects, and enums are their names.
+- Tagged unions are `{"member": value}`, or just `"member"` when it holds nothing.
+- `blob` is base64.
+- 64-bit integers past ±2^53 are strings, and NaN and infinities are `"NaN"`, `"Infinity"` and `"-Infinity"`.
+
+Untagged unions, pointers and objects have no JSON. Reading ignores unknown fields and keeps defaults for missing ones. Zig has `rt.json`; other languages use the host's `toJson` and `fromJson`.
+
+## Tagged unions
+
+```
+enum ShapeKind : u8 { circle, box, none }
+
+union Shape : ShapeKind {
+    f32 circle;
+    Vec3 box;
+    void none;
+}
+```
+
+Each enum value needs a member, with `void` for one that holds nothing. On the wire it's `tag`, then a `payload` union. Zig gets a `union(enum)`, and scripts see `{ circle: 2 }`.
+
+## Any
+
+```
+trait Saves {
+    void save(string path, any value);
+}
+```
+
+An `any` is a value borrowed for the call, with its `TypeInfo` from `core.sal`: its fields, layout and a hash. Every language makes one from a generated type, and gets the value back only if the hash matches. For example, Zig has `rt.Any.from` and `any.lift`, C++ has `sal::Any::of` and `any.as<T>()`, and scripts use `any("Vec3", v)`.
 
 ## Building
 
@@ -98,7 +126,7 @@ You need the Zig version in `build.zig.zon` under `minimum_zig_version`. Then:
 zig build test
 ```
 
-`zig build build-test` builds the test programs into `zig-out/bin` without running them. Pass `-Dtarget=` to build for another platform, like `x86_64-linux-musl`.
+Pass `-Dtarget=` for another platform, like `x86_64-linux-musl`.
 
 Want to help? See [CONTRIBUTING.md](https://github.com/ratatoskr/.github/blob/main/CONTRIBUTING.md). Found a security problem? See [SECURITY.md](https://github.com/ratatoskr/.github/blob/main/SECURITY.md).
 

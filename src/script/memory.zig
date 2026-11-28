@@ -42,6 +42,44 @@ pub fn put(mem: [*]u8, n: usize, v: u64) void {
     @memcpy(mem[0..n], std.mem.asBytes(&v)[0..n]);
 }
 
+// Tagged unions: a struct with its `tag` first, then a `payload` union of the members that hold something
+
+pub fn isVoid(r: Ref) bool {
+    return r == .prim and r.prim == .void;
+}
+
+/// Where a tagged union's payload is.
+pub fn payloadAt(t: *const Schema.Type) usize {
+    for (t.kind.@"struct".fields) |f| if (std.mem.eql(u8, f.name, "payload")) return f.offset;
+    return 0;
+}
+
+fn tagSize(s: Schema, tg: Schema.Tagged) usize {
+    return s.findType(tg.tag).?.kind.@"enum".backing.size(s.pointer_size);
+}
+
+/// A member's tag, as the tag's bytes have it.
+fn tagBits(s: Schema, tg: Schema.Tagged, member: []const u8) ?u64 {
+    const v = Schema.enumValue(s.findType(tg.tag).?, member) orelse return null;
+    const n = tagSize(s, tg);
+    const all: u64 = if (n >= 8) ~@as(u64, 0) else (@as(u64, 1) << @intCast(n * 8)) - 1;
+    return @as(u64, @truncate(@as(u128, @bitCast(v)))) & all;
+}
+
+/// The member a tagged union's tag says is there. Null for a tag from a newer version.
+pub fn liveMember(s: Schema, t: *const Schema.Type, mem: [*]const u8) ?Schema.Field {
+    const tg = t.kind.@"struct".tagged.?;
+    const tag = bits(mem, tagSize(s, tg));
+    for (tg.members) |m| if (tagBits(s, tg, m.name) == tag) return m;
+    return null;
+}
+
+/// Sets a tagged union's tag to `member`'s.
+pub fn putTag(s: Schema, t: *const Schema.Type, mem: [*]u8, member: []const u8) void {
+    const tg = t.kind.@"struct".tagged.?;
+    put(mem, tagSize(s, tg), tagBits(s, tg, member).?);
+}
+
 pub const Int = union(enum) {
     signed: i64,
     unsigned: u64,

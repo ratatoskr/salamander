@@ -467,6 +467,7 @@ pub fn pushBuiltin(b: *Binder, l: *State) void {
         .{ "load", builtinLoadC },
         .{ "nameOf", builtinNameOfC },
         .{ "params", builtinParamsC },
+        .{ "any", builtinAnyC },
     };
     c.lua_createtable(l, 0, list.len);
     const t = lua.top(l);
@@ -720,6 +721,18 @@ fn declaredName(l: *State, idx: c_int) ?[]const u8 {
 fn builtinNameOfC(l_: ?*State) callconv(.c) c_int {
     const l = l_.?;
     if (declaredName(l, 1)) |n| lua.pushString(l, n) else c.lua_pushnil(l);
+    return 1;
+}
+
+/// `any(type, value)`, for an `any` parameter: `value` as the type named, like `Vec3`.
+fn builtinAnyC(l_: ?*State) callconv(.c) c_int {
+    const l = l_.?;
+    c.lua_createtable(l, 0, 2);
+    const t = lua.top(l);
+    c.lua_pushvalue(l, 1);
+    lua.rawSet(l, t, "type");
+    c.lua_pushvalue(l, 2);
+    lua.rawSet(l, t, "value");
     return 1;
 }
 

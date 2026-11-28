@@ -75,7 +75,7 @@ pub fn classOf(s: Schema, r: Ref) Class {
         .prim => |p| switch (p) {
             .f32 => .{ .float = 4 },
             .f64 => .{ .float = 8 },
-            .string, .object, .blob, .void => .{ .aggregate = shapeOf(s, r) },
+            .string, .object, .blob, .any, .void => .{ .aggregate = shapeOf(s, r) },
             else => .{ .int = @intCast(p.size(s.pointer_size)) },
         },
         .pointer => .{ .int = s.pointer_size },
@@ -239,7 +239,7 @@ fn leavesOf(s: Schema, r: Ref, base: usize, out: *Leaves, depth: usize) void {
         .prim => |p| switch (p) {
             .void => {},
             .f32, .f64 => out.add(.{ .offset = base, .size = p.size(s.pointer_size), .float = true }),
-            .string, .object, .blob => {
+            .string, .object, .blob, .any => {
                 out.add(.{ .offset = base, .size = ps, .float = false });
                 out.add(.{ .offset = base + ps, .size = ps, .float = false });
             },

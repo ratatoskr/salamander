@@ -27,6 +27,7 @@ test {
     _ = core;
     _ = memory;
     _ = views;
+    _ = @import("types.zig");
     _ = engine;
     _ = @import("params.zig");
     _ = @import("Gate.zig");

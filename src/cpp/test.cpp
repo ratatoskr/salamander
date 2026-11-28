@@ -244,4 +244,30 @@ uint32_t cpp_game(uintptr_t (*locate)(sal::String name)) {
     return 0;
 }
 
+// Type info, which has to be the same as every other language's
+const sal::TypeInfo *cpp_type_info(uint32_t which) {
+    switch (which) {
+    case 0: return &sal::TypeOf<Player>::info;
+    case 1: return &sal::TypeOf<Scene::Graph>::info;
+    case 2: return &sal::TypeOf<Bag>::info;
+    case 3: return &sal::TypeOf<Shape>::info;
+    default: return nullptr;
+    }
+}
+
+// A tagged union's members, only as the tag says
+float cpp_shape() {
+    Shape s = Shape::of_circle(2.5f);
+    if (s.box() || !Shape::of_none().none() || Shape::of_none().circle()) return -1;
+    return *s.circle();
+}
+
+// A Vec3 through an any, and back only as one
+float cpp_any_y() {
+    Vec3 v{1, 2, 3};
+    sal::Any a = sal::Any::of(v);
+    const Vec3 *back = a.as<Vec3>();
+    return back && !a.as<Pair>() ? back->y : -1;
+}
+
 } // extern "C"

@@ -323,7 +323,7 @@ pub fn unwrapFn(b: *Binder, t: *Trait, v: Value) convert.Error!rt.AnyObject {
 // The `salamander` module scripts import, for types they write while running
 
 pub const builtin_module = "salamander";
-pub const builtin_exports = [_][:0]const u8{ "fn", "implement", "as", "native", "at", "addressOf", "typeOf", "sizeOf", "snapshot", "save", "edit", "load", "nameOf", "params" };
+pub const builtin_exports = [_][:0]const u8{ "fn", "implement", "as", "native", "at", "addressOf", "typeOf", "sizeOf", "snapshot", "save", "edit", "load", "nameOf", "params", "any" };
 
 /// One of `builtin_exports`, as a function.
 pub fn builtin(b: *Binder, name: []const u8) Value {
@@ -344,6 +344,7 @@ pub fn builtin(b: *Binder, name: []const u8) Value {
         .{ "load", &builtinLoad },
         .{ "nameOf", &builtinNameOf },
         .{ "params", &builtinParams },
+        .{ "any", &builtinAny },
     };
     const f = for (table) |e| {
         if (std.mem.eql(u8, e[0], name)) break e[1];
@@ -544,6 +545,17 @@ fn builtinAs(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_i
 fn declaredName(b: *Binder, v: Value) Value {
     if (!c.JS_IsFunction(b.ctx, v)) return qjs.undefined_value;
     return c.JS_GetProperty(b.ctx, v, b.declared_tag);
+}
+
+/// `any(type, value)`, for an `any` parameter: `value` as the type named, like `Vec3`.
+fn builtinAny(ctx_: ?*qjs.Context, _: Value, argc: c_int, argv: [*c]Value, _: c_int, _: [*c]Value) callconv(.c) Value {
+    const ctx = ctx_.?;
+    if (argc < 2) return qjs.throw(ctx, "any takes a type's name and a value", .{});
+    const obj = c.JS_NewObject(ctx);
+    if (c.JS_IsException(obj)) return obj;
+    qjs.set(ctx, obj, "type", c.JS_DupValue(ctx, argv[0]));
+    qjs.set(ctx, obj, "value", c.JS_DupValue(ctx, argv[1]));
+    return obj;
 }
 
 /// `nameOf(f)`, the full name of a declared function like `Kai.Player.heal`, or undefined.

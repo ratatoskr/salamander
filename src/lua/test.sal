@@ -25,3 +25,20 @@ trait Counter {
     // Lets go of what hold kept
     void drop();
 }
+
+// Takes a value of any type
+trait Scale {
+    // A Vec2's x, or -1 for anything else
+    f32 weigh(any value);
+    // Twice as big, the same kind
+    Shape grow(Shape s);
+}
+
+enum ShapeKind : u8 { circle, label, none }
+
+// One of its members, as its tag says
+union Shape : ShapeKind {
+    f32 circle;
+    string label;
+    void none;
+}

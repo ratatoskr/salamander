@@ -113,6 +113,8 @@ pub const Prim = enum {
     blob,
     /// C's `const char*`, UTF-8 up to a zero or null. Borrowed for the call.
     cstring,
+    /// A value with its `core.TypeInfo`, for code that takes any type. Only a parameter, borrowed for the call.
+    any,
 
     pub fn size(self: Prim, pointer_size: u8) usize {
         return switch (self) {
@@ -121,14 +123,14 @@ pub const Prim = enum {
             .u32, .i32, .f32 => 4,
             .u64, .i64, .f64 => 8,
             .usize, .isize, .cstring => pointer_size,
-            .string, .object, .blob => 2 * @as(usize, pointer_size),
+            .string, .object, .blob, .any => 2 * @as(usize, pointer_size),
             .void => 0,
         };
     }
 
     pub fn alignment(self: Prim, pointer_size: u8) usize {
         return switch (self) {
-            .string, .object, .blob => pointer_size,
+            .string, .object, .blob, .any => pointer_size,
             .void => 1,
             else => self.size(pointer_size),
         };
@@ -338,7 +340,20 @@ pub const Struct = struct {
     methods: []const Method = &.{},
     /// Globals that belong with it, like `Player.instance`.
     statics: []const Static = &.{},
+    /// Set when it's a tagged union, `union Shape : Kind { ... }`, laid out as its `tag` then a `payload` union.
+    tagged: ?Tagged = null,
 };
+
+/// A tagged union's tag and members. Its struct holds `tag` and, if a member holds something, `payload`, a union of those.
+pub const Tagged = struct {
+    /// The enum whose values name its members.
+    tag: []const u8,
+    /// As written, `void` ones too.
+    members: []const Field,
+};
+
+/// What a tagged union's payload union is called, nested in it, apart from its field so C# can have both.
+pub const payload_name = "Members";
 
 /// A global in existing code, like `[Sig("..")] static Player* player;`, found by a tool's annotations.
 pub const Static = struct {

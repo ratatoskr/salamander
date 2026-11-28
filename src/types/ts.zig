@@ -222,6 +222,8 @@ pub fn builtins(w: *Writer) Error!void {
         \\  export function as<T = any>(trait: string, obj: unknown): T;
         \\  /** The full name of a declared function, like `"Kai.Player.heal"`, or undefined for anything else. */
         \\  export function nameOf(f: unknown): string | undefined;
+        \\  /** For an `any` parameter: `value` as the type named, like `Vec3`. */
+        \\  export function any(type: string, value: unknown): { type: string; value: unknown };
         \\  /** A function's parameter names, as written. One that isn't a plain name, like `{ a }`, is `""`. */
         \\  export function params(f: (...args: any[]) => any): string[];
         \\  /** A live view of `type`, like `"Player"` or `"u32[4]"`, at `address`. Null at 0. */
@@ -264,6 +266,25 @@ fn declareType(w: *Writer, s: Schema, source: []const u8, live: *const types.Liv
     switch (t.kind) {
         .@"struct", .@"union" => |st| {
             const is_live = live.has(s, t);
+            // A tagged union is one member keyed to its value, or its name when it holds nothing
+            if (st.tagged) |tg| if (!is_live) {
+                try doc(w, source, t.at, indent);
+                try w.print("{s}type ", .{indent});
+                try Schema.writeFlatName(w, e.leaf);
+                try w.writeAll(" =");
+                if (tg.members.len == 0) try w.writeAll(" never");
+                for (tg.members, 0..) |m, i| {
+                    try w.writeAll(if (i == 0) " " else " | ");
+                    if (m.type == .prim and m.type.prim == .void) {
+                        try w.print("\"{s}\"", .{m.name});
+                    } else {
+                        try w.print("{{ {s}: ", .{m.name});
+                        try typeRef(w, s, m.type, .out);
+                        try w.writeAll(" }");
+                    }
+                }
+                return w.writeAll(";\n");
+            };
             try doc(w, source, t.at, indent);
             try w.print("{s}interface ", .{indent});
             try Schema.writeFlatName(w, e.leaf);
@@ -467,6 +488,7 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
             .object => "object | null",
             .void => "void",
             .blob => "Uint8Array | null",
+            .any => "{ type: string; value: unknown }",
         }),
         .named => |n| {
             if (s.findTrait(n) != null) {

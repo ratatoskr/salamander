@@ -177,6 +177,58 @@ test "scripts call Zig's impl" {
     try testing.expectEqual(42, n);
 }
 
+/// Only weighs Vec2s.
+const Weigher = struct {
+    pub fn weigh(_: *Weigher, value: rt.Any) f32 {
+        const v = value.as(Vec2) orelse return -1;
+        return v.x;
+    }
+    pub fn grow(_: *Weigher, s: B.Shape) B.Shape {
+        return switch (s) {
+            .circle => |r| .{ .circle = r * 2 },
+            .label => |l| .{ .label = if (std.mem.eql(u8, l, "a")) "aa" else l },
+            .none => .none,
+        };
+    }
+};
+
+test "anys cross as { type, value }" {
+    var f: Fixture = try .init();
+    defer f.deinit();
+    var w: Weigher = .{};
+    const obj: rt.Object(B.Scale) = .init(&w, rt.implement(B.Scale, Weigher));
+    const t = try f.binder.trait(f.module, "Scale");
+    const g = c.JS_GetGlobalObject(f.ctx);
+    defer c.JS_FreeValue(f.ctx, g);
+    qjs.set(f.ctx, g, "scale", try f.binder.wrap(t, .of(obj)));
+    qjs.set(f.ctx, g, "any", f.binder.builtin("any"));
+    const v = try f.eval(
+        \\if (scale.weigh(any("Vec2", { x: 3, y: 4 })) !== 3) throw new Error("as a Vec2");
+        \\if (scale.weigh({ type: "Mode", value: "two" }) !== -1) throw new Error("as a Mode");
+        \\let threw = false;
+        \\try { scale.weigh(any("Nope", 1)); } catch (e) { threw = true; }
+        \\if (scale.grow({ circle: 2 }).circle !== 4) throw new Error("a circle");
+        \\if (scale.grow({ label: "a" }).label !== "aa") throw new Error("a label");
+        \\if (scale.grow("none") !== "none") throw new Error("none");
+        \\let bad = false;
+        \\try { scale.grow("circle"); } catch (e) { bad = true; }
+        \\threw && bad
+    );
+    defer c.JS_FreeValue(f.ctx, v);
+    try testing.expect(c.JS_ToBool(f.ctx, v) > 0);
+
+    // And a script's, given one from Zig
+    const impl = try f.eval(
+        \\({ weigh(a) { return a.type === "Vec2" ? a.value.y : -1; } })
+    );
+    defer c.JS_FreeValue(f.ctx, impl);
+    const back = (try f.binder.unwrap(t, impl)).as(rt.Object(B.Scale));
+    var vec: Vec2 = .{ .x = 1, .y = 7 };
+    try testing.expectEqual(7, back.weigh(.of(&vec)));
+    var mode: Mode = .two;
+    try testing.expectEqual(-1, back.weigh(.of(&mode)));
+}
+
 var factor: i32 = 3;
 
 fn triple(by: *i32, x: i32) i32 {

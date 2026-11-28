@@ -229,6 +229,12 @@ pub fn builtins(w: *Writer) Error!void {
         \\---@return string|nil
         \\function salamander.nameOf(f) end
         \\
+        \\---For an `any` parameter: `value` as the type named, like `Vec3`.
+        \\---@param type string
+        \\---@param value any
+        \\---@return {type: string, value: any}
+        \\function salamander.any(type, value) end
+        \\
         \\---A Lua function's parameter names, in order.
         \\---@param f function
         \\---@return string[]
@@ -295,6 +301,23 @@ fn declareType(w: *Writer, s: Schema, source: []const u8, live: *const types.Liv
     switch (t.kind) {
         .@"struct", .@"union" => |st| {
             const is_live = live.has(s, t);
+            // A tagged union is one member keyed to its value, or its name when it holds nothing
+            if (st.tagged) |tg| if (!is_live) {
+                try doc(w, source, t.at);
+                try w.writeAll("---@alias ");
+                try types.writeTypeName(w, t.name);
+                for (tg.members, 0..) |m, i| {
+                    try w.writeAll(if (i == 0) " " else "|");
+                    if (m.type == .prim and m.type.prim == .void) {
+                        try w.print("\"{s}\"", .{m.name});
+                    } else {
+                        try w.print("{{{s}: ", .{m.name});
+                        try typeRef(w, s, m.type, .field);
+                        try w.writeAll("}");
+                    }
+                }
+                return w.writeAll("\n\n");
+            };
             const methods = for (st.methods) |m| {
                 if (!m.static) break true;
             } else false;
@@ -485,6 +508,7 @@ fn typeRef(w: *Writer, s: Schema, r: Ref, use: Use) Error!void {
             .utf8, .utf16, .string, .blob => "string",
             .cstring => "string|nil",
             .object => "any",
+            .any => "{type: string, value: any}",
             .void => "nil",
         }),
         .named => |n| {

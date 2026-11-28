@@ -206,6 +206,48 @@ public unsafe struct AnyObject
     public void* table;
 }
 
+/// <summary>A value with its TypeInfo, borrowed for the call. A null type is none.</summary>
+public unsafe struct Any
+{
+    public Raw.TypeInfo* type;
+    public void* value;
+
+    /// <summary>v, a generated struct as it crosses. It has to stay put for the call.</summary>
+    public static Any Of<T>(T* v) where T : unmanaged, ITypeOf => new() { type = T.SalamanderType, value = v };
+
+    /// <summary>The value if it's a T, matched by hash.</summary>
+    public T* As<T>() where T : unmanaged, ITypeOf => type != null && type->hash == T.SalamanderType->hash ? (T*)value : null;
+}
+
+/// <summary>What a type is. Generated structs implement it with their info.</summary>
+public unsafe interface ITypeOf
+{
+    static abstract Raw.TypeInfo* SalamanderType { get; }
+}
+
+/// <summary>What generated code makes its type info with, kept for good.</summary>
+public static unsafe class TypeInfos
+{
+    public static Raw.TypeInfo* Make() => (Raw.TypeInfo*)NativeMemory.AllocZeroed((nuint)sizeof(Raw.TypeInfo));
+
+    /// <summary>A u8 literal, which stays where it is.</summary>
+    public static Str Name(ReadOnlySpan<byte> utf8) => new() { ptr = (byte*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref MemoryMarshal.GetReference(utf8)), len = (nuint)utf8.Length };
+
+    public static Raw.Slice_FieldInfo Fields(params Raw.FieldInfo[] fields)
+    {
+        var p = (Raw.FieldInfo*)NativeMemory.AllocZeroed((nuint)(sizeof(Raw.FieldInfo) * fields.Length));
+        for (int i = 0; i < fields.Length; i++) p[i] = fields[i];
+        return new() { ptr = p, len = (nuint)fields.Length };
+    }
+
+    public static Raw.Slice_EnumValue Values(params Raw.EnumValue[] values)
+    {
+        var p = (Raw.EnumValue*)NativeMemory.AllocZeroed((nuint)(sizeof(Raw.EnumValue) * values.Length));
+        for (int i = 0; i < values.Length; i++) p[i] = values[i];
+        return new() { ptr = p, len = (nuint)values.Length };
+    }
+}
+
 // What the idiomatic layer runs on
 
 /// <summary>Memory for what a call or a value points at, like its text.</summary>

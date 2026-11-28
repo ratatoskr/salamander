@@ -239,6 +239,12 @@ const Gen = struct {
             changed = false;
             for (g.s.types) |t| {
                 if (t.kind != .@"struct" or g.isLifted(t.name)) continue;
+                // Plain Zig has a tagged union as a `union(enum)`
+                if (t.kind.@"struct".tagged != null) {
+                    try g.lifted.append(g.a, t.name);
+                    changed = true;
+                    continue;
+                }
                 for (t.kind.@"struct".fields) |f| if (g.differs(f.type)) {
                     try g.lifted.append(g.a, t.name);
                     changed = true;
@@ -319,7 +325,7 @@ const Gen = struct {
                 .@"struct", .@"union" => if (g.isLifted(t.name)) try g.plainDef(t) else try g.structDef(t),
                 .@"enum" => |e| {
                     try g.w.print("pub const {f} = ", .{id(try g.typeName(t.name))});
-                    try g.enumBody(@intCast(e.backing.size(s.pointer_size) * 8), e.backing.isSigned(), e.values);
+                    try g.enumBody(@intCast(e.backing.size(s.pointer_size) * 8), e.backing.isSigned(), e.values, t);
                     try g.w.writeAll(";\n");
                 },
                 .bitfield => try g.bitfieldDef(t),
@@ -382,6 +388,7 @@ const Gen = struct {
     /// A struct with text or slices as plain Zig, with defaults.
     fn plainDef(g: *Gen, t: *const Schema.Type) Error!void {
         const w = g.w;
+        if (t.kind.@"struct".tagged) |tg| return g.plainTagged(t, tg);
         try w.print("pub const {f} = struct {{\n", .{id(try g.typeName(t.name))});
         var names: std.ArrayList([]const u8) = .empty;
         var chain: std.ArrayList(*const Schema.Type) = .empty;
@@ -395,8 +402,115 @@ const Gen = struct {
             try g.plainDefault(f.type);
             try w.writeAll(",\n");
         };
+        try g.jsonHints(t, &names);
+        try g.typeInfoDecl(t, &names);
+        try g.claim(&names, t.name, "salamander_raw");
+        try w.print("    pub const salamander_raw = raw.{f};\n", .{id(try g.typeName(t.name))});
         try g.namespaceMembers(t.name, "    ", &names);
         try w.writeAll("};\n");
+    }
+
+    /// A tagged union as a `union(enum)` with the same names.
+    fn plainTagged(g: *Gen, t: *const Schema.Type, tg: Schema.Tagged) Error!void {
+        const w = g.w;
+        try w.print("pub const {f} = union(enum) {{\n", .{id(try g.typeName(t.name))});
+        var names: std.ArrayList([]const u8) = .empty;
+        for (tg.members) |m| {
+            try g.claim(&names, t.name, m.name);
+            try w.print("    {f}: ", .{id(m.name)});
+            if (m.type == .prim and m.type.prim == .void) try w.writeAll("void") else try g.plainType(m.type);
+            try w.writeAll(",\n");
+        }
+        try w.writeAll("\n");
+        try g.typeInfoDecl(t, &names);
+        try g.claim(&names, t.name, "salamander_raw");
+        try w.print("    pub const salamander_raw = raw.{f};\n", .{id(try g.typeName(t.name))});
+        try g.namespaceMembers(t.name, "    ", &names);
+        try w.writeAll("};\n");
+    }
+
+    /// Fields `rt.json` can't tell from their Zig type: `[]u8` is bytes, and `utf8[N]` is text.
+    fn jsonHints(g: *Gen, t: *const Schema.Type, names: *std.ArrayList([]const u8)) Error!void {
+        var text: std.ArrayList([]const u8) = .empty;
+        var bytes: std.ArrayList([]const u8) = .empty;
+        var at: ?*const Schema.Type = t;
+        while (at) |cur| : (at = g.s.baseOf(cur)) for (cur.kind.@"struct".fields) |f| switch (jsonHint(f.type)) {
+            .text => try text.append(g.a, f.name),
+            .bytes => try bytes.append(g.a, f.name),
+            .none => {},
+        };
+        if (text.items.len + bytes.items.len == 0) return;
+        try g.claim(names, t.name, "salamander_json");
+        const w = g.w;
+        try w.writeAll("\n    pub const salamander_json = struct {\n");
+        for ([_][]const u8{ "text", "bytes" }, [_][]const []const u8{ text.items, bytes.items }) |what, list| {
+            if (list.len == 0) continue;
+            try w.print("        pub const {s}: []const []const u8 = &.{{", .{what});
+            for (list, 0..) |n, i| try w.print("{s} \"{s}\"", .{ if (i > 0) "," else "", n });
+            try w.writeAll(" };\n");
+        }
+        try w.writeAll("    };\n");
+    }
+
+    fn jsonHint(r: Ref) enum { none, text, bytes } {
+        var cur = r;
+        var in: enum { none, slice, array } = .none;
+        while (true) switch (cur) {
+            .slice => |c| {
+                in = .slice;
+                cur = c.*;
+            },
+            .array => |arr| {
+                in = .array;
+                cur = arr.child.*;
+            },
+            .optional => |c| cur = c.*,
+            .prim => |p| return switch (p) {
+                .u8 => if (in == .slice) .bytes else .none,
+                .utf8 => if (in == .array) .text else .none,
+                else => .none,
+            },
+            else => return .none,
+        };
+    }
+
+    // Type info, `core.TypeInfo` for each type as it crosses
+
+    const info_type = "rt.core.raw.TypeInfo";
+
+    fn typeInfoDecl(g: *Gen, t: *const Schema.Type, names: *std.ArrayList([]const u8)) Error!void {
+        try g.claim(names, t.name, "salamander_type");
+        try g.w.print("    pub const salamander_type: " ++ info_type ++ " = .{{ {s} }};\n", .{try g.infoBody(.{ .named = t.name })});
+    }
+
+    /// A pointer to `r`'s info. Named types have theirs, the rest are made where they're used.
+    fn infoRef(g: *Gen, r: Ref) Error![]const u8 {
+        if (plan.ownsInfo(g.s, r)) return std.fmt.allocPrint(g.a, "@constCast(&generated.{f}.salamander_type)", .{id(try g.typeName(r.named))});
+        return std.fmt.allocPrint(g.a, "@constCast(&" ++ info_type ++ "{{ {s} }})", .{try g.infoBody(r)});
+    }
+
+    fn infoBody(g: *Gen, r: Ref) Error![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(g.a);
+        const w = &out.writer;
+        const i = plan.info(g.s, r);
+        try w.print(".kind = .{f}, .name = .init(\"{s}\"), .hash = 0x{x:0>16}, .size = {d}, .alignment = {d}", .{ std.zig.fmtId(i.kind), i.name, i.hash, i.size, i.alignment });
+        if (i.child) |c| try w.print(", .child = {s}", .{try g.infoRef(c)});
+        if (i.len > 0) try w.print(", .len = {d}", .{i.len});
+        var fields: plan.InfoFields = .init(g.s, r);
+        if (fields.t != null and fields.next() != null) {
+            fields = .init(g.s, r);
+            try w.writeAll(", .fields = .init(&.{");
+            while (fields.next()) |f| try w.print(" .{{ .name = .init(\"{s}\"), .type = {s}, .offset = {d}, .bit = {d}, .bits = {d} }},", .{ f.name, try g.infoRef(f.type), f.offset, f.bit, f.bits });
+            try w.writeAll(" })");
+        }
+        var values: plan.InfoValues = .init(g.s, r);
+        if (values.next() != null) {
+            values = .init(g.s, r);
+            try w.writeAll(", .values = .init(&.{");
+            while (values.next()) |v| try w.print(" .{{ .name = .init(\"{s}\"), .value = {d} }},", .{ v.name, v.value });
+            try w.writeAll(" })");
+        }
+        return out.written();
     }
 
     fn plainType(g: *Gen, r: Ref) Error!void {
@@ -480,6 +594,7 @@ const Gen = struct {
             .string => "rt.String",
             .object => "rt.AnyObject",
             .blob => "rt.Blob",
+            .any => "rt.Any",
             .cstring => "?[*:0]const u8",
             .void => "anyopaque",
             else => @tagName(p),
@@ -631,6 +746,11 @@ const Gen = struct {
             try w.print("    pub fn {f}(self: *@This()) []{s}{s} {{\n", .{ id(fn_name), al, elem });
             try w.print("        return @as([*]{s}{s}, @ptrCast(&self.{f}))[0..@intCast(@max(self.{f}, 0))];\n    }}\n", .{ al, elem, id(c.field), id(c.count) });
         }
+        if (t.kind == .@"struct" and !g.in_raw) try g.jsonHints(t, &names);
+        if (g.in_raw) {
+            try g.claim(&names, t.name, "salamander_type");
+            try w.print("    pub const salamander_type = generated.{f}.salamander_type;\n", .{id(try g.typeName(t.name))});
+        } else try g.typeInfoDecl(t, &names);
         if (t.kind == .@"struct") try g.gameCode(t, &names);
         if (!g.in_raw) try g.namespaceMembers(t.name, "    ", &names);
         try w.writeAll("};\n");
@@ -858,13 +978,20 @@ const Gen = struct {
         try g.memType(r);
     }
 
-    fn enumBody(g: *Gen, bits: u16, signed: bool, values: []const Schema.Enum.Value) Error!void {
+    /// With `t`'s `salamander_type` when it's a type of its own.
+    fn enumBody(g: *Gen, bits: u16, signed: bool, values: []const Schema.Enum.Value, t: ?*const Schema.Type) Error!void {
         try g.w.print("enum({c}{d}) {{ ", .{ @as(u8, if (signed) 'i' else 'u'), bits });
         for (values, 0..) |v, i| {
             if (i > 0) try g.w.writeAll(", ");
             try g.w.print("{f} = {d}", .{ id(v.name), v.value });
         }
         if (!plan.exhaustive(bits, values.len)) try g.w.writeAll(if (values.len > 0) ", _" else "_");
+        if (t) |own| {
+            try g.w.writeAll(",\n");
+            var names: std.ArrayList([]const u8) = .empty;
+            try g.typeInfoDecl(own, &names);
+            return g.w.writeAll("}");
+        }
         try g.w.writeAll(" }");
     }
 
@@ -882,7 +1009,7 @@ const Gen = struct {
                     .uint => try w.print("u{d} = 0", .{m.bits}),
                     .@"enum" => |n| {
                         const values = g.s.findType(n).?.kind.@"enum".values;
-                        try g.enumBody(m.bits, false, values);
+                        try g.enumBody(m.bits, false, values, null);
                         // Zero like the comptime types, unless it's an enum with no zero
                         if (plan.hasZero(m.bits, values)) try w.writeAll(" = @enumFromInt(0)");
                     },
@@ -890,6 +1017,8 @@ const Gen = struct {
                 try w.writeAll(",\n");
             },
         };
+        var names: std.ArrayList([]const u8) = .empty;
+        try g.typeInfoDecl(t, &names);
         try w.writeAll("};\n");
     }
 
@@ -1314,7 +1443,10 @@ test "writes the types" {
     try write(std.testing.allocator, parsed.schema, &out.writer, .{}, &diag);
     const text = out.written();
     const want = [_][]const u8{
-        "pub const Vec3 = extern struct {\n    x: f32 = std.mem.zeroes(f32),\n    y: f32 = std.mem.zeroes(f32),\n    z: f32 = std.mem.zeroes(f32),\n};",
+        "pub const Vec3 = extern struct {\n    x: f32 = std.mem.zeroes(f32),\n    y: f32 = std.mem.zeroes(f32),\n    z: f32 = std.mem.zeroes(f32),\n",
+        // And its type info, for `any`
+        "pub const salamander_type: rt.core.raw.TypeInfo = .{ .kind = .@\"struct\", .name = .init(\"Vec3\"), .hash = 0x",
+        ".{ .name = .init(\"z\"), .type = @constCast(&rt.core.raw.TypeInfo{ .kind = .@\"f32\", .name = .init(\"f32\"), .hash = 0x",
         "pub const LoadError = error{ NotFound, Corrupt };",
         "pub const LoadErrorCode = enum(u32) { NotFound = 1, Corrupt = 7, _ };",
         ".{ .name = \"move\", .Fn = fn (Vec3, []const u8) Vec3, .conv = .thiscall, .sig = 0x",

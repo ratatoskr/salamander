@@ -31,6 +31,7 @@ const type_names = .{
     "Vec3",        "Entity",                  "Player",                      "Pair",             "Bag",                           "Job",
     "Flags",       "Stat",                    "Handle",                      "Hooks",            "Visitor",                       "Scene.Node",
     "Scene.Graph", "Scene.List<Scene.Node*>", "Scene.Map<u32, Scene.Node*>", "Scene.List<Vec3>", "Scene.Entry<u32, Scene.Node*>", "Scene.List<Scene.Entry<u32, Scene.Node*>>",
+    "ShapeKind",   "Shape",
 };
 const trait_names = .{ "Walker", "Transform", "Named", "Damageable", "OnMove", "Freecam", "Scene.Picker" };
 
@@ -38,7 +39,9 @@ fn check(s: salamander_schema.Schema) !void {
     @setEvalBranchQuota(100_000);
     try testing.expectEqual(type_names.len + 1, s.types.len - nested(s));
     inline for (type_names) |name| {
-        const G = @field(gen, genName(name));
+        // A tagged union's plain union(enum) isn't laid out, but its wire form is
+        const Top = @field(gen, genName(name));
+        const G = if (@hasDecl(Top, "salamander_raw")) Top.salamander_raw else Top;
         const found = s.findType(name).?;
         switch (@typeInfo(G)) {
             .@"struct" => |info| if (info.layout == .@"bitpack") {
@@ -180,6 +183,8 @@ const from_c = struct {
     extern fn c_cam_speed() f32;
     extern fn c_provide(h: rt.Host) u32;
     extern fn c_get_and_set(h: rt.Host, speed: f32) f32;
+    extern fn c_type_info(which: u32) ?*const TypeInfo;
+    extern fn c_any_y() f32;
 };
 
 test "C calls through Zig's tables" {
@@ -235,6 +240,48 @@ test "C provides through the host, and Zig gets it" {
     try testing.expectEqual(9, from_c.c_get_and_set(rt.host(), 9));
 }
 
+const TypeInfo = rt.core.raw.TypeInfo;
+
+/// What every language's type info for `c_type_info` and the like has to match.
+const compared = [_]*const TypeInfo{ &gen.Player.salamander_type, &gen.Scene_Graph.salamander_type, &gen.Bag.salamander_type, &gen.Shape.salamander_type };
+
+/// The same all the way down, but for where it lives.
+fn expectSameInfo(want: *const TypeInfo, got: *const TypeInfo, depth: usize) !void {
+    errdefer std.debug.print("in {s}\n", .{want.name.get()});
+    try testing.expectEqual(want.kind, got.kind);
+    try testing.expectEqualStrings(want.name.get(), got.name.get());
+    try testing.expectEqual(want.hash, got.hash);
+    try testing.expectEqual(want.size, got.size);
+    try testing.expectEqual(want.alignment, got.alignment);
+    try testing.expectEqual(want.len, got.len);
+    // Hashes cover the rest, past the first few steps
+    if (depth > 4) return;
+    try testing.expectEqual(want.child == null, got.child == null);
+    if (want.child) |c| try expectSameInfo(c, got.child.?, depth + 1);
+    const wf = want.fields.get();
+    const gf = got.fields.get();
+    try testing.expectEqual(wf.len, gf.len);
+    for (wf, gf) |a, b| {
+        try testing.expectEqualStrings(a.name.get(), b.name.get());
+        try testing.expectEqual(a.offset, b.offset);
+        try testing.expectEqual(a.bit, b.bit);
+        try testing.expectEqual(a.bits, b.bits);
+        try expectSameInfo(a.type.?, b.type.?, depth + 1);
+    }
+    const wv = want.values.get();
+    const gv = got.values.get();
+    try testing.expectEqual(wv.len, gv.len);
+    for (wv, gv) |a, b| {
+        try testing.expectEqualStrings(a.name.get(), b.name.get());
+        try testing.expectEqual(a.value, b.value);
+    }
+}
+
+test "C's type info is Zig's, and its anys carry it" {
+    for (compared, 0..) |want, i| try expectSameInfo(want, from_c.c_type_info(@intCast(i)).?, 0);
+    try testing.expectEqual(2, from_c.c_any_y());
+}
+
 // C++'s side, in cpp/test.cpp, built against the generated header
 const from_cpp = struct {
     extern fn cpp_damage(d: gen.Damageable, amount: f32) bool;
@@ -260,7 +307,20 @@ const from_cpp = struct {
     extern fn cpp_dropped() u32;
     extern fn cpp_held() c_int;
     extern fn cpp_game(locate: *const fn (name: rt.String) callconv(.c) usize) u32;
+    extern fn cpp_type_info(which: u32) ?*const TypeInfo;
+    extern fn cpp_any_y() f32;
+    extern fn cpp_shape() f32;
 };
+
+test "C++ and Rust read tagged unions only as their tag says" {
+    try testing.expectEqual(2.5, from_cpp.cpp_shape());
+    try testing.expectEqual(2.5, try from_rust.call("rs_shape", Fn(.{}, f32), .{}));
+}
+
+test "C++'s type info is Zig's, and its anys carry it" {
+    for (compared, 0..) |want, i| try expectSameInfo(want, from_cpp.cpp_type_info(@intCast(i)).?, 0);
+    try testing.expectEqual(2, from_cpp.cpp_any_y());
+}
 
 test "C++ calls through Zig's tables" {
     var player: gen.Player = std.mem.zeroes(gen.Player);
@@ -435,6 +495,11 @@ test "Rust reads bitfields like Zig" {
     try testing.expectEqual(@as(u32, @bitCast(flags)), try from_rust.call("rs_flags_with_job", Fn(.{ u32, u8 }, u32), .{ bits, @backingInt(gen.Job.thief) }));
 }
 
+test "Rust's type info is Zig's, and its anys carry it" {
+    for (compared, 0..) |want, i| try expectSameInfo(want, (try from_rust.call("rs_type_info", Fn(.{u32}, ?*const TypeInfo), .{@as(u32, @intCast(i))})).?, 0);
+    try testing.expectEqual(2, try from_rust.call("rs_any_y", Fn(.{}, f32), .{}));
+}
+
 test "Rust provides through the host, keeps, awaits and converts to bases" {
     try testing.expect(try from_rust.call("rs_init", Fn(.{rt.Host}, bool), .{rt.host()}));
     try testing.expectEqual(0, try from_rust.call("rs_provide", Fn(.{}, u32), .{}));
@@ -596,6 +661,129 @@ test "implementations can take plain types" {
     try testing.expectEqual(1, obj.count(&tags));
     try testing.expectEqualStrings("y", obj.first(&.{ "x", "y" }));
     try testing.expectEqualStrings("found", (try obj.find("z")).tags[0].label);
+}
+
+test "generated types go to JSON and back" {
+    const record: plain.Record = .{
+        .title = "kai",
+        .data = &.{ 0, 255 },
+        .code = "ab\x00\x00\x00\x00\x00\x00".*,
+        .tags = &.{.{ .label = "x", .weight = 2 }},
+        .gait = .{ .on = true, .pace = .run },
+        .id = 9,
+        .scale = 1.5,
+    };
+    const text = try rt.json.stringifyAlloc(testing.allocator, record, .{});
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings(
+        \\{"title":"kai","data":[0,255],"code":"ab","tags":[{"label":"x","weight":2}],"gait":{"on":true,"pace":"run"},"id":9,"scale":1.5}
+    , text);
+    const back = try rt.json.parse(plain.Record, testing.allocator, text);
+    defer back.deinit();
+    try testing.expectEqualStrings("kai", back.value.title);
+    try testing.expectEqualSlices(u8, record.data, back.value.data);
+    try testing.expectEqual(record.code, back.value.code);
+    try testing.expectEqualStrings("x", back.value.tags[0].label);
+    try testing.expectEqual(record.gait, back.value.gait);
+    try testing.expectEqual(record.id, back.value.id);
+    try testing.expectEqual(record.scale, back.value.scale);
+}
+
+/// Takes any value, and only measures Records.
+const Ruler = struct {
+    pub fn measure(_: *Ruler, value: rt.Any) u32 {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const record = (value.lift(plain.Record, arena.allocator()) catch return 0) orelse return 0;
+        const text = rt.json.stringifyAlloc(arena.allocator(), record, .{}) catch return 0;
+        return @intCast(text.len);
+    }
+};
+
+test "any carries a value with its type, which the host's JSON reads" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const record: plain.Record = .{
+        .title = "kai",
+        .data = &.{ 0, 255 },
+        .code = "ab\x00\x00\x00\x00\x00\x00".*,
+        .tags = &.{ .{ .label = "x", .weight = 2 }, .{ .label = "y" } },
+        .gait = .{ .on = true, .pace = .run },
+        .id = 1 << 60,
+        .scale = 1.5,
+    };
+    const value = try rt.Any.from(arena.allocator(), record);
+    const expected = try rt.json.stringifyAlloc(testing.allocator, record, .{});
+    defer testing.allocator.free(expected);
+
+    // From type info alone, the same as Zig's own
+    const h = rt.host().raw();
+    const json = try h.toJson(value);
+    defer json.release();
+    try testing.expectEqualStrings(expected, json.bytes());
+
+    // And back, all in one blob
+    const back = try h.fromJson(expected, @constCast(&plain.Record.salamander_type));
+    defer back.release();
+    const wire: *const plain.raw.Record = @ptrCast(@alignCast(back.bytes().ptr));
+    const lifted = try rt.fromWire(plain.Record, arena.allocator(), wire.*);
+    try testing.expectEqualStrings("kai", lifted.title);
+    try testing.expectEqualSlices(u8, record.data, lifted.data);
+    try testing.expectEqual(record.code, lifted.code);
+    try testing.expectEqualStrings("y", lifted.tags[1].label);
+    try testing.expectEqual(record.gait, lifted.gait);
+    try testing.expectEqual(record.id, lifted.id);
+    try testing.expectError(error.Mismatch, h.fromJson("{\"id\":\"x\"}", @constCast(&plain.Record.salamander_type)));
+    try testing.expectError(error.Invalid, h.fromJson("{", @constCast(&plain.Record.salamander_type)));
+
+    // Through a trait, matched by hash
+    var ruler: Ruler = .{};
+    const obj: plain.Measurer = .init(&ruler, rt.implement(plain.Measurer, Ruler));
+    try testing.expectEqual(expected.len, obj.measure(value));
+    try testing.expectEqual(0, obj.measure(try rt.Any.from(arena.allocator(), plain.Tag{ .label = "x" })));
+    try testing.expect(value.as(plain.Tag) == null);
+}
+
+test "tagged unions are union(enum) in Zig, and their JSON is keyed by member" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h = rt.host().raw();
+    const cases = [_]struct { plain.Shape, []const u8 }{
+        .{ .{ .circle = 2.5 }, "{\"circle\":2.5}" },
+        .{ .{ .square = .{ .label = "x", .weight = 3 } }, "{\"square\":{\"label\":\"x\",\"weight\":3}}" },
+        .{ .{ .label = "hi" }, "{\"label\":\"hi\"}" },
+        .{ .none, "\"none\"" },
+    };
+    for (cases) |case| {
+        const shape, const want = case;
+        // Zig's own, both ways
+        const text = try rt.json.stringifyAlloc(a, shape, .{});
+        try testing.expectEqualStrings(want, text);
+        const back = try rt.json.parseLeaky(plain.Shape, a, text);
+        try testing.expectEqual(std.meta.activeTag(shape), std.meta.activeTag(back));
+
+        // Through the wire form and type info alone, the same
+        const value = try rt.Any.from(a, shape);
+        try testing.expectEqualStrings(@tagName(std.meta.activeTag(shape)), @tagName(value.as(plain.raw.Shape).?.tag));
+        const json = try h.toJson(value);
+        defer json.release();
+        try testing.expectEqualStrings(want, json.bytes());
+        const read = try h.fromJson(want, @constCast(&plain.Shape.salamander_type));
+        defer read.release();
+        const wire: *const plain.raw.Shape = @ptrCast(@alignCast(read.bytes().ptr));
+        const lifted = try rt.fromWire(plain.Shape, a, wire.*);
+        try testing.expectEqual(std.meta.activeTag(shape), std.meta.activeTag(lifted));
+        switch (shape) {
+            .circle => |r| try testing.expectEqual(r, lifted.circle),
+            .square => |t| try testing.expectEqualStrings(t.label, lifted.square.label),
+            .label => |l| try testing.expectEqualStrings(l, lifted.label),
+            .none => {},
+        }
+    }
+    try testing.expectError(error.Mismatch, rt.json.parseLeaky(plain.Shape, a, "{\"circle\":1,\"label\":\"x\"}"));
+    try testing.expectError(error.Mismatch, rt.json.parseLeaky(plain.Shape, a, "\"circle\""));
+    try testing.expectError(error.Mismatch, h.fromJson("{\"none\":1}", @constCast(&plain.Shape.salamander_type)));
 }
 
 test "an array as long as a field" {

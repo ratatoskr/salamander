@@ -186,6 +186,43 @@ pub const AnyObject = extern struct {
     }
 };
 
+/// A value with its type info, the format's `any`. Borrowed for the call.
+pub const Any = extern struct {
+    type: ?*const core.raw.TypeInfo = null,
+    value: ?*const anyopaque = null,
+
+    /// `v`, a generated type's wire value. It has to outlive the call.
+    pub fn of(v: anytype) Any {
+        const T = @typeInfo(@TypeOf(v)).pointer.child;
+        return .{ .type = &T.salamander_type, .value = v };
+    }
+
+    /// `v`, any generated type's value, as it crosses. What it points at goes in `a`.
+    pub fn from(a: std.mem.Allocator, v: anytype) error{OutOfMemory}!Any {
+        const T = @TypeOf(v);
+        const W = if (@hasDecl(T, "salamander_raw")) T.salamander_raw else T;
+        const wire = try a.create(W);
+        wire.* = try toWire(W, a, v);
+        return .{ .type = &T.salamander_type, .value = wire };
+    }
+
+    /// Its value if it's a `T`, matched by hash. Wire types for ones with plain versions.
+    pub fn as(self: Any, comptime T: type) ?*const T {
+        const info = self.type orelse return null;
+        if (info.hash != T.salamander_type.hash) return null;
+        return @ptrCast(@alignCast(self.value));
+    }
+
+    /// Its value as plain `T`, if it's one, with what it points at in `a`.
+    pub fn lift(self: Any, comptime T: type, a: std.mem.Allocator) error{OutOfMemory}!?T {
+        const W = if (@hasDecl(T, "salamander_raw")) T.salamander_raw else T;
+        const info = self.type orelse return null;
+        if (info.hash != T.salamander_type.hash) return null;
+        const wire: *const W = @ptrCast(@alignCast(self.value));
+        return try fromWire(T, a, wire.*);
+    }
+};
+
 /// Follows fields through pointers, like `follow(manager, "items.table.data")`, each read through `declared.read`.
 /// Null at a null or unreadable pointer. A struct held by value on the way gives a pointer to it.
 pub fn follow(start: anytype, comptime path: []const u8) ?Followed(Start(@TypeOf(start)), path) {
@@ -323,6 +360,8 @@ pub const holding = promise.holding;
 pub const blobs = @import("blob.zig");
 /// Bytes kept by a count, `blob` in schemas. Each holder owns a count and releases it.
 pub const Blob = blobs.Blob;
+/// Sal values as JSON, the same in every language.
+pub const json = @import("json.zig");
 pub const Awaited = promise.Awaited;
 
 /// A pointer comptime types use where a real one would make a type contain itself. `Get.Type` is looked up lazily.
@@ -656,6 +695,18 @@ pub fn toWire(comptime W: type, a: std.mem.Allocator, v: anytype) error{OutOfMem
     if (V == W) return v;
     switch (@typeInfo(W)) {
         .@"struct" => |info| {
+            // A tagged union, as its tag and payload
+            if (@typeInfo(V) == .@"union") {
+                const Tag = @FieldType(W, "tag");
+                var out: W = std.mem.zeroes(W);
+                switch (v) {
+                    inline else => |x, which| {
+                        out.tag = @field(Tag, @tagName(which));
+                        if (@TypeOf(x) != void) @field(out.payload, @tagName(which)) = try toWire(@FieldType(@FieldType(W, "payload"), @tagName(which)), a, x);
+                    },
+                }
+                return out;
+            }
             if (@hasDecl(W, "salamander_slice")) {
                 const E = W.salamander_slice;
                 const items: []const @typeInfo(V).pointer.child = v;
@@ -706,6 +757,16 @@ pub fn fromWire(comptime P: type, a: std.mem.Allocator, w: anytype) error{OutOfM
             }
             return out;
         },
+        // A tagged union, from its tag and payload
+        .@"union" => |info| {
+            const Tag = @TypeOf(w.tag);
+            inline for (info.field_names, info.field_types) |n, F| if (w.tag == @field(Tag, n)) {
+                return @unionInit(P, n, if (F == void) {} else try fromWire(F, a, @field(w.payload, n)));
+            };
+            // A tag from a newer version reads as the first member, as it would be if zeroed
+            const F = info.field_types[0];
+            return @unionInit(P, info.field_names[0], if (F == void) {} else plainDefault(F));
+        },
         .array => |arr| {
             var out: P = undefined;
             for (w, &out) |x, *o| o.* = try fromWire(arr.child, a, x);
@@ -714,6 +775,16 @@ pub fn fromWire(comptime P: type, a: std.mem.Allocator, w: anytype) error{OutOfM
         .optional => |o| return if (w) |x| try fromWire(o.child, a, x) else null,
         else => return w,
     }
+}
+
+/// What a plain type is when nothing's said, like zeroed memory read as it.
+fn plainDefault(comptime T: type) T {
+    return switch (@typeInfo(T)) {
+        .@"struct" => if (@hasDecl(T, "salamander_raw") or @typeInfo(T).@"struct".layout != .@"extern") .{} else std.mem.zeroes(T),
+        .pointer => &.{},
+        .@"union" => |info| @unionInit(T, info.field_names[0], if (info.field_types[0] == void) {} else plainDefault(info.field_types[0])),
+        else => std.mem.zeroes(T),
+    };
 }
 
 threadlocal var lifted: ?std.heap.ArenaAllocator = null;
@@ -820,6 +891,7 @@ test {
     _ = @import("tests.zig");
     _ = promise;
     _ = blobs;
+    _ = json;
     _ = @import("Owner.zig");
     _ = Local;
     _ = queue_file;

@@ -254,3 +254,259 @@ pub fn refReachesType(s: Schema, r: Ref, to: []const u8) bool {
 
 /// Names that mean something in the generated file's top level.
 pub const reserved = [_][]const u8{ "rt", "impl" };
+
+/// `core.TypeInfo`'s `hash`: a type's name and layout, and its fields' too, so the same type matches in another binary.
+pub fn typeHash(s: Schema, r: Ref) u64 {
+    var h: TypeHash = .{ .s = s };
+    h.ref(r);
+    return h.f;
+}
+
+const TypeHash = struct {
+    s: Schema,
+    f: u64 = 0xcbf29ce484222325,
+    /// Named types being hashed, so one that reaches itself stops there.
+    stack: [32][]const u8 = undefined,
+    depth: usize = 0,
+
+    fn bytes(h: *TypeHash, b: []const u8) void {
+        for (b) |c| h.f = (h.f ^ c) *% 0x100000001b3;
+        h.f = (h.f ^ 0xff) *% 0x100000001b3;
+    }
+
+    fn int(h: *TypeHash, v: u64) void {
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &buf, v, .little);
+        for (buf) |c| h.f = (h.f ^ c) *% 0x100000001b3;
+    }
+
+    fn ref(h: *TypeHash, r: Ref) void {
+        h.int(@backingInt(@as(std.meta.Tag(Ref), r)));
+        switch (r) {
+            .prim => |p| h.int(@backingInt(p)),
+            .named => |n| h.named(n),
+            .pointer, .slice, .optional => |c| h.ref(c.*),
+            .array => |a| {
+                h.int(a.len);
+                h.ref(a.child.*);
+            },
+            .result => |res| {
+                h.ref(res.ok.*);
+                h.bytes(res.err);
+            },
+            .func => |sig| h.int(Schema.signatureHash(sig.*)),
+        }
+    }
+
+    fn named(h: *TypeHash, n: []const u8) void {
+        h.bytes(n);
+        for (h.stack[0..h.depth]) |o| if (std.mem.eql(u8, o, n)) return;
+        if (h.depth == h.stack.len) return;
+        // A trait's name is all there is to its layout
+        const t = h.s.findType(n) orelse return;
+        h.stack[h.depth] = n;
+        h.depth += 1;
+        defer h.depth -= 1;
+        h.int(@backingInt(@as(std.meta.Tag(Schema.Type.Kind), t.kind)));
+        if (h.s.memory(.{ .named = n })) |m| {
+            h.int(m.size);
+            h.int(m.alignment);
+        }
+        switch (t.kind) {
+            .@"struct", .@"union" => {
+                if (t.kind == .@"struct") if (t.kind.@"struct".tagged) |tg| {
+                    h.bytes("tagged");
+                    for (tg.members) |m| {
+                        h.bytes(m.name);
+                        h.ref(m.type);
+                    }
+                };
+                var it: Slots = .init(h.s, t);
+                while (it.next()) |slot| if (slot == .field) {
+                    const f = slot.field.field;
+                    h.bytes(f.name);
+                    h.int(if (t.kind == .@"union") 0 else f.offset);
+                    h.ref(f.type);
+                };
+            },
+            .@"enum" => |e| {
+                h.int(@backingInt(e.backing));
+                for (e.values) |v| {
+                    h.bytes(v.name);
+                    h.int(@bitCast(@as(i64, @truncate(v.value))));
+                }
+            },
+            .bitfield => |b| {
+                h.int(@backingInt(b.backing));
+                for (b.members) |m| {
+                    h.bytes(m.name);
+                    h.int(m.bit);
+                    h.int(m.bits);
+                    h.int(@backingInt(@as(std.meta.Tag(Schema.Bits.Member), m.type)));
+                    if (m.type == .@"enum") h.named(m.type.@"enum");
+                }
+            },
+            .@"error" => |e| for (e.errors) |x| {
+                h.bytes(x.name);
+                h.int(x.code);
+            },
+            .func => |sig| h.int(Schema.signatureHash(sig)),
+            .@"opaque" => {},
+        }
+    }
+};
+
+/// What `core.TypeInfo` says about a type, for generators writing one.
+pub const Info = struct {
+    /// Its `TypeKind`'s name.
+    kind: []const u8,
+    /// Empty for what has no name, like `[]T`.
+    name: []const u8,
+    hash: u64,
+    size: usize,
+    alignment: usize,
+    /// What a pointer, array, slice or optional holds, or an enum's or bitfield's backing.
+    child: ?Ref = null,
+    len: usize = 0,
+};
+
+pub fn info(s: Schema, r: Ref) Info {
+    const m = s.memory(r) orelse Schema.Memory{ .size = 0, .alignment = 1 };
+    var out: Info = .{ .kind = "", .name = "", .hash = typeHash(s, r), .size = m.size, .alignment = m.alignment };
+    switch (r) {
+        .prim => |p| {
+            out.kind = @tagName(p);
+            out.name = @tagName(p);
+        },
+        .named => |n| {
+            out.name = n;
+            out.kind = "object";
+            if (s.findType(n)) |t| {
+                out.kind = @tagName(t.kind);
+                switch (t.kind) {
+                    .@"enum" => |e| out.child = .{ .prim = e.backing },
+                    .bitfield => |b| out.child = .{ .prim = b.backing },
+                    .@"struct" => |st| if (st.tagged) |tg| {
+                        out.kind = "tagged";
+                        out.child = .{ .named = tg.tag };
+                    },
+                    else => {},
+                }
+            }
+        },
+        .pointer, .optional, .slice => |c| {
+            out.kind = @tagName(r);
+            out.child = c.*;
+        },
+        .array => |a| {
+            out.kind = "array";
+            out.child = a.child.*;
+            out.len = a.len;
+        },
+        .func => out.kind = "func",
+        .result => unreachable,
+    }
+    return out;
+}
+
+/// Named structs, unions, enums and bitfields have their own info, which the rest point to.
+pub fn ownsInfo(s: Schema, r: Ref) bool {
+    if (r != .named) return false;
+    const t = s.findType(r.named) orelse return false;
+    return switch (t.kind) {
+        .@"struct", .@"union", .@"enum", .bitfield => true,
+        else => false,
+    };
+}
+
+pub const InfoField = struct {
+    name: []const u8,
+    type: Ref,
+    offset: usize = 0,
+    bit: u16 = 0,
+    bits: u16 = 0,
+};
+
+/// A struct's or union's fields, or a bitfield's members, as `TypeInfo.fields` has them.
+pub const InfoFields = struct {
+    t: ?*const Schema.Type,
+    slots: ?Slots = null,
+    index: usize = 0,
+    /// Where a tagged union's payload is.
+    payload_at: usize = 0,
+
+    pub fn init(s: Schema, r: Ref) InfoFields {
+        const t = if (r == .named) s.findType(r.named) else null;
+        var it: InfoFields = .{ .t = t };
+        if (t) |tt| if (tt.kind == .@"struct" and tt.kind.@"struct".tagged != null) {
+            for (tt.kind.@"struct".fields) |f| if (std.mem.eql(u8, f.name, "payload")) {
+                it.payload_at = f.offset;
+            };
+        } else if (tt.kind == .@"struct" or tt.kind == .@"union") {
+            it.slots = .init(s, tt);
+        };
+        return it;
+    }
+
+    pub fn next(it: *InfoFields) ?InfoField {
+        const t = it.t orelse return null;
+        if (t.kind == .@"struct") if (t.kind.@"struct".tagged) |tg| {
+            if (it.index >= tg.members.len) return null;
+            const m = tg.members[it.index];
+            it.index += 1;
+            return .{ .name = m.name, .type = m.type, .offset = it.payload_at };
+        };
+        if (it.slots) |*slots| {
+            while (slots.next()) |slot| if (slot == .field) {
+                const f = slot.field.field;
+                return .{ .name = f.name, .type = f.type, .offset = if (t.kind == .@"union") 0 else f.offset };
+            };
+            return null;
+        }
+        if (t.kind != .bitfield) return null;
+        const b = t.kind.bitfield;
+        if (it.index >= b.members.len) return null;
+        const m = b.members[it.index];
+        it.index += 1;
+        // As generated Zig has them: a wider bool is a number
+        const ty: Ref = switch (m.type) {
+            .bool => if (m.bits == 1) .{ .prim = .bool } else .{ .prim = b.backing },
+            .uint => .{ .prim = b.backing },
+            .@"enum" => |en| .{ .named = en },
+        };
+        return .{ .name = m.name, .type = ty, .bit = m.bit, .bits = m.bits };
+    }
+};
+
+pub const InfoValue = struct {
+    name: []const u8,
+    value: i64,
+};
+
+/// An enum's or error set's values.
+/// An enum's or error set's values, or each of a tagged union's members' tag values.
+pub const InfoValues = struct {
+    s: Schema,
+    t: ?*const Schema.Type,
+    index: usize = 0,
+
+    pub fn init(s: Schema, r: Ref) InfoValues {
+        return .{ .s = s, .t = if (r == .named) s.findType(r.named) else null };
+    }
+
+    pub fn next(it: *InfoValues) ?InfoValue {
+        const t = it.t orelse return null;
+        defer it.index += 1;
+        if (t.kind == .@"struct") if (t.kind.@"struct".tagged) |tg| {
+            if (it.index >= tg.members.len) return null;
+            const m = tg.members[it.index];
+            const e = it.s.findType(tg.tag) orelse return null;
+            return .{ .name = m.name, .value = @truncate(Schema.enumValue(e, m.name) orelse 0) };
+        };
+        return switch (t.kind) {
+            .@"enum" => |e| if (it.index < e.values.len) .{ .name = e.values[it.index].name, .value = @truncate(e.values[it.index].value) } else null,
+            .@"error" => |e| if (it.index < e.errors.len) .{ .name = e.errors[it.index].name, .value = e.errors[it.index].code } else null,
+            else => null,
+        };
+    }
+};

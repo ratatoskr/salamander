@@ -20,3 +20,38 @@ trait Profiles {
 }
 
 error ProfileError { Missing = 1 }
+
+// Fields whose JSON generated Zig names, as their Zig types can't say
+
+enum Pace : u8 { walk = 1, run }
+
+bitfield Gait : u8 {
+    bool on;
+    Pace pace : 2;
+}
+
+struct Record {
+    string title;
+    []u8 data;
+    utf8[8] code;
+    []Tag tags;
+    Gait gait;
+    u64 id;
+    f32 scale;
+}
+
+// Takes values of any type
+trait Measurer {
+    // How long a Record's JSON is, or 0 for anything else
+    u32 measure(any value);
+}
+
+// One of its members, as its tag says
+enum ShapeKind : u8 { circle, square, label, none }
+
+union Shape : ShapeKind {
+    f32 circle;
+    Tag square;
+    string label;
+    void none;
+}

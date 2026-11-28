@@ -94,6 +94,25 @@ typedef struct sal_object {
     const void *table;
 } sal_object;
 
+struct sal_TypeInfo;
+
+/* A value with its sal_TypeInfo, borrowed for the call. A NULL type is none. */
+typedef struct sal_any {
+    const struct sal_TypeInfo *type;
+    const void *value;
+} sal_any;
+
+/* A pointer to a T, like Vec3, as an any. */
+#define SAL_ANY(T, value) ((sal_any){ &T##_sal_type, (const T *)(value) })
+/* The any's value as a const T*, or NULL if it isn't a T, matched by hash. */
+#define SAL_AS(T, any) ((any).type && (any).type->hash == T##_sal_type.hash ? (const T *)(any).value : NULL)
+
+#if defined(__GNUC__) || defined(__clang__)
+#define SAL_UNUSED __attribute__((unused))
+#else
+#define SAL_UNUSED
+#endif
+
 /* The start of a table's initializer, for one of trait T's. */
 #define SAL_TABLE(T) .salamander_info = &sal_info_##T, .salamander_owner = NULL
 

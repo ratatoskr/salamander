@@ -175,6 +175,7 @@ const Gen = struct {
             .utf16 => "uint16_t",
             .string => "sal_string",
             .object, .blob => "sal_object",
+            .any => "sal_any",
             .cstring => "const char*",
             .void => "void",
         };
@@ -330,8 +331,57 @@ const Gen = struct {
         }
         for (s.traits) |*t| if (!g.aliased(t.at)) try g.trait(t);
         try g.declared();
+        try g.typeInfos();
 
         try g.print("\n#endif\n", .{});
+    }
+
+    // Type info, `sal_TypeInfo` for each type, which `SAL_ANY` uses
+
+    fn typeInfos(g: *Gen) Error!void {
+        const s = g.s;
+        var any = false;
+        for (s.types) |t| if (!g.aliased(t.at) and plan.ownsInfo(s, .{ .named = t.name })) {
+            if (!any) try g.print("\n/* Type info, for SAL_ANY */\n", .{});
+            any = true;
+            try g.print("SAL_UNUSED static const {s} {s}_sal_type;\n", .{ g.core("TypeInfo"), try g.name(t.name) });
+        };
+        for (s.types) |t| if (!g.aliased(t.at) and plan.ownsInfo(s, .{ .named = t.name })) {
+            try g.print("SAL_UNUSED static const {s} {s}_sal_type = {{ {s} }};\n", .{ g.core("TypeInfo"), try g.name(t.name), try g.infoBody(.{ .named = t.name }) });
+        };
+    }
+
+    fn infoRef(g: *Gen, r: Ref) Error![]const u8 {
+        if (plan.ownsInfo(g.s, r)) return g.fmt("({s} *)&{s}_sal_type", .{ g.core("TypeInfo"), try g.name(r.named) });
+        return g.fmt("({s} *)&(const {s}){{ {s} }}", .{ g.core("TypeInfo"), g.core("TypeInfo"), try g.infoBody(r) });
+    }
+
+    fn infoBody(g: *Gen, r: Ref) Error![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(g.a);
+        const w = &out.writer;
+        const i = plan.info(g.s, r);
+        try w.print(".kind = {s}TypeKind_{s}, .name = {{ \"{s}\", {d} }}, .hash = 0x{x:0>16}ull, .size = {d}, .alignment = {d}", .{ core_prefix, i.kind, i.name, i.name.len, i.hash, i.size, i.alignment });
+        if (i.child) |c| try w.print(", .child = {s}", .{try g.infoRef(c)});
+        if (i.len > 0) try w.print(", .len = {d}", .{i.len});
+        var fields: plan.InfoFields = .init(g.s, r);
+        var count: usize = 0;
+        while (fields.next()) |_| count += 1;
+        if (count > 0) {
+            fields = .init(g.s, r);
+            try w.print(", .fields = {{ (const {s}[]){{", .{g.core("FieldInfo")});
+            while (fields.next()) |f| try w.print(" {{ .name = {{ \"{s}\", {d} }}, .type = {s}, .offset = {d}, .bit = {d}, .bits = {d} }},", .{ f.name, f.name.len, try g.infoRef(f.type), f.offset, f.bit, f.bits });
+            try w.print(" }}, {d} }}", .{count});
+        }
+        var values: plan.InfoValues = .init(g.s, r);
+        count = 0;
+        while (values.next()) |_| count += 1;
+        if (count > 0) {
+            values = .init(g.s, r);
+            try w.print(", .values = {{ (const {s}[]){{", .{g.core("EnumValue")});
+            while (values.next()) |v| try w.print(" {{ .name = {{ \"{s}\", {d} }}, .value = {d}ll }},", .{ v.name, v.name.len, v.value });
+            try w.print(" }}, {d} }}", .{count});
+        }
+        return out.written();
     }
 
     /// Existing code the schema declares: each one's full name, and a pointer type for functions, `self` first for methods.

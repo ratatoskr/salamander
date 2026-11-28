@@ -12,6 +12,36 @@ namespace Probe;
 // The C# side of the tests passing test.sal's types and traits with Zig
 public static unsafe class Traits
 {
+    // Type info, which has to be the same as Zig's
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static Salamander.Raw.TypeInfo* TypeInfoOf(int which) => which switch
+    {
+        0 => Mixed.SalamanderType,
+        1 => Sal.Raw.Tagged.SalamanderType,
+        2 => Flags.SalamanderType,
+        3 => Shape.SalamanderType,
+        _ => null,
+    };
+
+    // A tagged union's members, only as the tag says
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static float ShapeRadius()
+    {
+        var s = Shape.OfCircle(2.5f);
+        if (s.TryGetBox(out _) || !Shape.OfNone().IsNone || Shape.OfNone().TryGetCircle(out _)) return -1;
+        return s.TryGetCircle(out var r) ? r : -1;
+    }
+
+    // A Vec3 through an any, and back only as one
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    public static float AnyY()
+    {
+        var v = new Vec3 { X = 1, Y = 2, Z = 3 };
+        var a = Any.Of(&v);
+        var back = a.As<Vec3>();
+        return back != null && a.As<Mixed>() == null ? back->Y : -1;
+    }
+
     // Sizes and offsets as C# lays them out, for Zig to check against its own
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int Layout(nuint* into, int max)
