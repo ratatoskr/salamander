@@ -1,7 +1,7 @@
 .{
     .name = .salamander,
     .version = "0.0.1",
-    .minimum_zig_version = "0.18.0-dev.1311+3a0e028c5",
+    .minimum_zig_version = "0.18.0-dev.1327+c851a1daa",
     .paths = .{
         "build.zig",
         "build.zig.zon",
